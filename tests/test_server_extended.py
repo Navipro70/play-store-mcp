@@ -1130,3 +1130,152 @@ class TestRefundOrderTool:
         mock_client.refund_order.assert_called_once_with(
             "com.example.app", "GPA.0001-2222-3333-4444", True
         )
+
+
+# =========================================================================
+# Group #4 — server tools
+# =========================================================================
+
+
+from play_store_mcp.models import (  # noqa: E402
+    Apk as _Apk,
+)
+from play_store_mcp.models import (  # noqa: E402
+    Bundle as _Bundle,
+)
+from play_store_mcp.models import (  # noqa: E402
+    CountryAvailability as _CountryAvailability,
+)
+from play_store_mcp.models import (  # noqa: E402
+    CustomTrackResult as _CustomTrackResult,
+)
+from play_store_mcp.models import (  # noqa: E402
+    DeobfuscationResult as _DeobfuscationResult,
+)
+from play_store_mcp.models import (  # noqa: E402
+    EditValidationResult as _EditValidationResult,
+)
+from play_store_mcp.server import (  # noqa: E402
+    create_custom_track,
+    get_country_availability,
+    list_apks,
+    list_bundles,
+    upload_deobfuscation_file,
+)
+from play_store_mcp.server import (  # noqa: E402
+    validate_edit as validate_edit_tool,
+)
+
+
+class TestUploadDeobfuscationTool:
+    def test_negative_version_code(self, mock_client: MagicMock, tmp_path: Any) -> None:
+        result = upload_deobfuscation_file(
+            package_name="com.example.app",
+            version_code=0,
+            file_path=str(tmp_path / "m.txt"),
+        )
+        assert result["success"] is False
+        mock_client.upload_deobfuscation_file.assert_not_called()
+
+    def test_calls_client(self, mock_client: MagicMock, tmp_path: Any) -> None:
+        f = tmp_path / "mapping.txt"
+        f.write_text("x")
+        mock_client.upload_deobfuscation_file.return_value = _DeobfuscationResult(
+            success=True,
+            package_name="com.example.app",
+            version_code=100,
+            file_type="proguard",
+            message="ok",
+        )
+        result = upload_deobfuscation_file(
+            package_name="com.example.app",
+            version_code=100,
+            file_path=str(f),
+            file_type="proguard",
+        )
+        assert result["success"] is True
+        mock_client.upload_deobfuscation_file.assert_called_once_with(
+            "com.example.app", 100, str(f), "proguard"
+        )
+
+
+class TestListBundlesApksTool:
+    def test_list_bundles(self, mock_client: MagicMock) -> None:
+        mock_client.list_bundles.return_value = [
+            _Bundle(version_code=100, sha1="a", sha256="b"),
+        ]
+        result = list_bundles(package_name="com.example.app")
+        assert result["success"] is True
+        assert len(result["bundles"]) == 1
+
+    def test_list_apks(self, mock_client: MagicMock) -> None:
+        mock_client.list_apks.return_value = [
+            _Apk(version_code=50, sha256="x"),
+        ]
+        result = list_apks(package_name="com.example.app")
+        assert result["success"] is True
+        assert len(result["apks"]) == 1
+
+    def test_list_bundles_wraps_error(self, mock_client: MagicMock) -> None:
+        mock_client.list_bundles.side_effect = PlayStoreClientError("Boom")
+        result = list_bundles(package_name="com.example.app")
+        assert result["success"] is False
+        assert "Boom" in result["error"]
+
+
+class TestCountryAvailabilityTool:
+    def test_happy(self, mock_client: MagicMock) -> None:
+        mock_client.get_country_availability.return_value = _CountryAvailability(
+            track="production",
+            rest_of_world=True,
+            sync_with_production=False,
+            countries=["US", "DE"],
+        )
+        result = get_country_availability(package_name="com.example.app", track="production")
+        assert result["success"] is True
+        assert result["countries"] == ["US", "DE"]
+
+
+class TestCreateCustomTrackTool:
+    @pytest.mark.parametrize("ff", ["mobile", "default", "WEAR_OS"])
+    def test_invalid_form_factor(self, mock_client: MagicMock, ff: str) -> None:
+        result = create_custom_track(package_name="com.example.app", track="qa", form_factor=ff)
+        assert result["success"] is False
+        mock_client.create_custom_track.assert_not_called()
+
+    def test_empty_track_rejected(self, mock_client: MagicMock) -> None:
+        result = create_custom_track(package_name="com.example.app", track="")
+        assert result["success"] is False
+        mock_client.create_custom_track.assert_not_called()
+
+    def test_happy(self, mock_client: MagicMock) -> None:
+        mock_client.create_custom_track.return_value = _CustomTrackResult(
+            success=True,
+            package_name="com.example.app",
+            track="qa-team",
+            message="ok",
+        )
+        result = create_custom_track(package_name="com.example.app", track="qa-team")
+        assert result["success"] is True
+        mock_client.create_custom_track.assert_called_once_with(
+            "com.example.app", "qa-team", "DEFAULT"
+        )
+
+
+class TestValidateEditTool:
+    def test_empty_edit_id(self, mock_client: MagicMock) -> None:
+        result = validate_edit_tool(package_name="com.example.app", edit_id="")
+        assert result["success"] is False
+        mock_client.validate_edit.assert_not_called()
+
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.validate_edit.return_value = _EditValidationResult(
+            success=True,
+            package_name="com.example.app",
+            edit_id="e1",
+            valid=True,
+            message="ok",
+        )
+        result = validate_edit_tool(package_name="com.example.app", edit_id="e1")
+        assert result["success"] is True
+        assert result["valid"] is True

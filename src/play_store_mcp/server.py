@@ -1257,6 +1257,198 @@ def refund_order(
 
 
 # =============================================================================
+# Group #4: deobfuscation, bundles/apks list, country availability,
+# custom tracks, edits.validate
+# =============================================================================
+
+
+_FORM_FACTORS: tuple[str, ...] = ("DEFAULT", "WEAR", "AUTOMOTIVE")
+
+
+@mcp.tool()
+def upload_deobfuscation_file(
+    package_name: str,
+    version_code: int,
+    file_path: str,
+    file_type: str = "proguard",
+) -> dict[str, Any]:
+    """Upload a deobfuscation/mapping file (ProGuard / R8 mapping.txt or
+    native debug symbols) for an APK or AAB version.
+
+    Without a mapping file, Google Play Console crash stack traces stay
+    obfuscated and Vitals data is much less useful. After uploading the
+    binary via deploy_app, call this tool with the version_code from the
+    deploy result and the path to mapping.txt.
+
+    For native crashes (NDK), set `file_type="nativeCode"` and pass a zip
+    of the symbol files.
+
+    Args:
+        package_name: App package name.
+        version_code: APK/AAB version code that this mapping applies to.
+        file_path: Path to mapping.txt / .zip / .gz / .map.
+        file_type: "proguard" (default) or "nativeCode".
+
+    Returns:
+        Dict with `success`, `version_code`, `file_type`, `message`, `error`.
+    """
+    if version_code <= 0:
+        return {"success": False, "error": "version_code must be positive"}
+
+    client = get_client_from_context()
+    result = client.upload_deobfuscation_file(package_name, version_code, file_path, file_type)
+    return result.model_dump()
+
+
+@mcp.tool()
+def list_bundles(package_name: str) -> dict[str, Any]:
+    """List Android App Bundles uploaded to the app's edit area.
+
+    Useful to discover which version_codes have been uploaded but not yet
+    rolled out, or to map a version_code to its sha1/sha256 binary hash.
+
+    Args:
+        package_name: App package name.
+
+    Returns:
+        Dict with `success`, `bundles` (list of {version_code, sha1, sha256}).
+    """
+    client = get_client_from_context()
+    try:
+        bundles = client.list_bundles(package_name)
+        return {
+            "success": True,
+            "package_name": package_name,
+            "bundles": [b.model_dump() for b in bundles],
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def list_apks(package_name: str) -> dict[str, Any]:
+    """List APKs uploaded to the app's edit area.
+
+    Same as list_bundles but for legacy APK uploads. Most apps should be
+    on App Bundles; APK list is useful for older deploys.
+
+    Args:
+        package_name: App package name.
+
+    Returns:
+        Dict with `success`, `apks` (list of {version_code, sha1, sha256}).
+    """
+    client = get_client_from_context()
+    try:
+        apks = client.list_apks(package_name)
+        return {
+            "success": True,
+            "package_name": package_name,
+            "apks": [a.model_dump() for a in apks],
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def get_country_availability(
+    package_name: str,
+    track: str,
+) -> dict[str, Any]:
+    """Get per-track country availability (which regions a track ships to).
+
+    Read-only mirror of `edits.countryAvailability.get`. Helpful before
+    promoting a release to verify that the target track has the expected
+    regions enabled.
+
+    Args:
+        package_name: App package name.
+        track: Track name (e.g. "production", "beta", or a custom closed
+            testing track).
+
+    Returns:
+        Dict with `success`, `track`, `rest_of_world`, `sync_with_production`,
+        `countries` (list of ISO 3166-1 alpha-2 codes).
+    """
+    client = get_client_from_context()
+    try:
+        ca = client.get_country_availability(package_name, track)
+        return {
+            "success": True,
+            **ca.model_dump(),
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_custom_track(
+    package_name: str,
+    track: str,
+    form_factor: str = "DEFAULT",
+) -> dict[str, Any]:
+    """Create a custom closed-testing track.
+
+    Publisher API only supports closed-testing tracks via this endpoint —
+    you cannot create open testing or production tracks here. Use this when
+    you need a dedicated track for a specific tester group beyond the
+    default internal/alpha/beta.
+
+    Args:
+        package_name: App package name.
+        track: New track identifier (e.g. "qa-team", "wear:qa-team"). For
+            non-DEFAULT form_factor the prefix must match (e.g. wear: for
+            WEAR).
+        form_factor: One of DEFAULT, WEAR, AUTOMOTIVE. Default DEFAULT.
+
+    Returns:
+        Dict with `success`, `track`, `message`, `error`.
+    """
+    if form_factor not in _FORM_FACTORS:
+        return {
+            "success": False,
+            "error": f"form_factor must be one of {_FORM_FACTORS}",
+        }
+    if not track:
+        return {"success": False, "error": "track cannot be empty"}
+
+    client = get_client_from_context()
+    result = client.create_custom_track(package_name, track, form_factor)
+    return result.model_dump()
+
+
+@mcp.tool()
+def validate_edit(
+    package_name: str,
+    edit_id: str,
+) -> dict[str, Any]:
+    """Dry-run validate an existing edit (`edits.validate`).
+
+    Most tools manage edit lifecycle internally and never expose edit_ids.
+    Use this when you have an edit_id from another flow and want Google to
+    confirm it can commit cleanly before actually committing.
+
+    Note: this returns success=True for a *successful API call*. The
+    validation outcome itself is in the `valid` field. If the edit doesn't
+    pass validation, `success=True` but `valid=False` with `error` set to
+    Google's reason.
+
+    Args:
+        package_name: App package name.
+        edit_id: Edit ID to validate.
+
+    Returns:
+        Dict with `success`, `valid`, `message`, `error`.
+    """
+    if not edit_id:
+        return {"success": False, "error": "edit_id cannot be empty"}
+
+    client = get_client_from_context()
+    result = client.validate_edit(package_name, edit_id)
+    return result.model_dump()
+
+
+# =============================================================================
 # HTTP Endpoints for Streamable Transport
 # =============================================================================
 

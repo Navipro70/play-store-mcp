@@ -19,10 +19,16 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from play_store_mcp.models import (
+    Apk,
     AppDetails,
     BatchDeploymentResult,
     BatchImageUploadResult,
+    Bundle,
+    CountryAvailability,
+    CustomTrackResult,
+    DeobfuscationResult,
     DeploymentResult,
+    EditValidationResult,
     ExpansionFile,
     ImageType,
     InAppProduct,
@@ -2434,5 +2440,288 @@ class PlayStoreClient:
                 order_id=order_id,
                 revoked=False,
                 message=f"Refund failed: {e.reason}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Group #4: deobfuscationfiles, bundles/apks list, countryAvailability,
+    # custom tracks, edits.validate
+    # =========================================================================
+
+    def upload_deobfuscation_file(
+        self,
+        package_name: str,
+        version_code: int,
+        file_path: str,
+        file_type: str = "proguard",
+    ) -> DeobfuscationResult:
+        """Upload a mapping.txt or native debug symbols for an APK/AAB version.
+
+        Mirrors `edits.deobfuscationfiles.upload`. ``file_type`` must be
+        ``"proguard"`` or ``"nativeCode"``. The upload runs in its own edit
+        session and is committed on success.
+        """
+        if file_type not in {"proguard", "nativeCode"}:
+            return DeobfuscationResult(
+                success=False,
+                package_name=package_name,
+                version_code=version_code,
+                file_type=file_type,
+                message=f"file_type must be 'proguard' or 'nativeCode', got: {file_type}",
+                error="ValueError",
+            )
+        try:
+            resolved = self._validate_mapping_file(file_path)
+        except ValueError as e:
+            return DeobfuscationResult(
+                success=False,
+                package_name=package_name,
+                version_code=version_code,
+                file_type=file_type,
+                message=str(e),
+                error="ValueError",
+            )
+        self._logger.info(
+            "Uploading deobfuscation file",
+            package_name=package_name,
+            version_code=version_code,
+            file_type=file_type,
+            file_path=str(resolved),
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        try:
+            media = MediaFileUpload(
+                str(resolved),
+                mimetype="application/octet-stream",
+                resumable=True,
+            )
+            response = (
+                service.edits()
+                .deobfuscationfiles()
+                .upload(
+                    packageName=package_name,
+                    editId=edit_id,
+                    apkVersionCode=version_code,
+                    deobfuscationFileType=file_type,
+                    media_body=media,
+                )
+                .execute()
+            )
+            self._commit_edit(package_name, edit_id)
+            df = response.get("deobfuscationFile") if isinstance(response, dict) else None
+            sha256 = df.get("symbolType") if isinstance(df, dict) else None
+            return DeobfuscationResult(
+                success=True,
+                package_name=package_name,
+                version_code=version_code,
+                file_type=file_type,
+                sha256=sha256,
+                message=f"Uploaded {file_type} for version_code={version_code}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to upload deobfuscation file", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return DeobfuscationResult(
+                success=False,
+                package_name=package_name,
+                version_code=version_code,
+                file_type=file_type,
+                message=f"Upload failed: {e.reason}",
+                error=str(e),
+            )
+
+    def list_bundles(self, package_name: str) -> list[Bundle]:
+        """List Android App Bundles in a fresh edit session."""
+        self._logger.info("Listing bundles", package_name=package_name)
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        try:
+            response = (
+                service.edits().bundles().list(packageName=package_name, editId=edit_id).execute()
+            )
+            return [
+                Bundle(
+                    version_code=int(b.get("versionCode", 0)),
+                    sha1=b.get("sha1"),
+                    sha256=b.get("sha256"),
+                )
+                for b in response.get("bundles", [])
+            ]
+        except HttpError as e:
+            self._logger.exception("Failed to list bundles", error=str(e))
+            raise PlayStoreClientError(f"Failed to list bundles: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def list_apks(self, package_name: str) -> list[Apk]:
+        """List APKs in a fresh edit session."""
+        self._logger.info("Listing apks", package_name=package_name)
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        try:
+            response = (
+                service.edits().apks().list(packageName=package_name, editId=edit_id).execute()
+            )
+            apks: list[Apk] = []
+            for a in response.get("apks", []):
+                binary = a.get("binary") or {}
+                apks.append(
+                    Apk(
+                        version_code=int(a.get("versionCode", 0)),
+                        sha1=binary.get("sha1") if isinstance(binary, dict) else None,
+                        sha256=binary.get("sha256") if isinstance(binary, dict) else None,
+                    )
+                )
+            return apks
+        except HttpError as e:
+            self._logger.exception("Failed to list apks", error=str(e))
+            raise PlayStoreClientError(f"Failed to list apks: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def get_country_availability(
+        self,
+        package_name: str,
+        track: str,
+    ) -> CountryAvailability:
+        """Read per-track country availability (`edits.countryAvailability.get`)."""
+        self._logger.info(
+            "Getting country availability",
+            package_name=package_name,
+            track=track,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        try:
+            data = (
+                service.edits()
+                .countryavailability()
+                .get(packageName=package_name, editId=edit_id, track=track)
+                .execute()
+            )
+            countries_raw = data.get("countries", []) or []
+            country_codes = [c.get("country") if isinstance(c, dict) else c for c in countries_raw]
+            return CountryAvailability(
+                track=track,
+                rest_of_world=bool(data.get("restOfWorld", False)),
+                sync_with_production=bool(data.get("syncWithProduction", False)),
+                countries=[c for c in country_codes if isinstance(c, str)],
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to get country availability", error=str(e))
+            raise PlayStoreClientError(f"Failed to get country availability: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def create_custom_track(
+        self,
+        package_name: str,
+        track: str,
+        form_factor: str = "DEFAULT",
+    ) -> CustomTrackResult:
+        """Create a closed-testing track via `edits.tracks.create`.
+
+        The Publisher API only allows ``type=CLOSED_TESTING``. ``form_factor``
+        accepts DEFAULT, WEAR, or AUTOMOTIVE.
+        """
+        if form_factor not in {"DEFAULT", "WEAR", "AUTOMOTIVE"}:
+            return CustomTrackResult(
+                success=False,
+                package_name=package_name,
+                track=track,
+                message=(
+                    f"form_factor must be one of DEFAULT, WEAR, AUTOMOTIVE; got: {form_factor}"
+                ),
+                error="ValueError",
+            )
+        if not track:
+            return CustomTrackResult(
+                success=False,
+                package_name=package_name,
+                track=track,
+                message="track cannot be empty",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Creating custom track",
+            package_name=package_name,
+            track=track,
+            form_factor=form_factor,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        body = {
+            "type": "CLOSED_TESTING",
+            "formFactor": form_factor,
+            "track": track,
+        }
+        try:
+            service.edits().tracks().create(
+                packageName=package_name,
+                editId=edit_id,
+                body=body,
+            ).execute()
+            self._commit_edit(package_name, edit_id)
+            return CustomTrackResult(
+                success=True,
+                package_name=package_name,
+                track=track,
+                message=f"Created closed-testing track '{track}' ({form_factor})",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to create custom track", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return CustomTrackResult(
+                success=False,
+                package_name=package_name,
+                track=track,
+                message=f"Track create failed: {e.reason}",
+                error=str(e),
+            )
+
+    def validate_edit(
+        self,
+        package_name: str,
+        edit_id: str,
+    ) -> EditValidationResult:
+        """Dry-run an existing edit via `edits.validate`.
+
+        Use when you already know an edit_id and want Google to verify it can
+        commit before you actually commit. Most repo tools manage edit_ids
+        internally — this is mostly for advanced users wiring multi-step flows.
+        """
+        if not edit_id:
+            return EditValidationResult(
+                success=False,
+                package_name=package_name,
+                edit_id=edit_id,
+                valid=False,
+                message="edit_id cannot be empty",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Validating edit",
+            package_name=package_name,
+            edit_id=edit_id,
+        )
+        service = self._get_service()
+        try:
+            service.edits().validate(packageName=package_name, editId=edit_id).execute()
+            return EditValidationResult(
+                success=True,
+                package_name=package_name,
+                edit_id=edit_id,
+                valid=True,
+                message=f"Edit {edit_id} is valid",
+            )
+        except HttpError as e:
+            self._logger.exception("Edit validation failed", error=str(e))
+            return EditValidationResult(
+                success=True,
+                package_name=package_name,
+                edit_id=edit_id,
+                valid=False,
+                message=f"Edit not valid: {e.reason}",
                 error=str(e),
             )

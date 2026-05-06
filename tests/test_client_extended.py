@@ -1837,3 +1837,268 @@ class TestValidateOrderId:
     def test_invalid(self, order_id: str) -> None:
         with pytest.raises(ValueError):
             PlayStoreClient._validate_order_id(order_id)
+
+
+# =========================================================================
+# Group #4 — deobfuscation, bundles/apks list, country availability,
+# custom tracks, edits.validate
+# =========================================================================
+
+
+class TestUploadDeobfuscation:
+    def test_invalid_file_type(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        f = tmp_path / "mapping.txt"
+        f.write_text("x")
+        result = client.upload_deobfuscation_file(
+            "com.example.app", 100, str(f), file_type="invalid"
+        )
+        assert result.success is False
+        assert "proguard" in result.message
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_missing_file(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        result = client.upload_deobfuscation_file(
+            "com.example.app", 100, str(tmp_path / "missing.txt")
+        )
+        assert result.success is False
+        assert "File not found" in result.message
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_bad_extension(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        f = tmp_path / "mapping.exe"
+        f.write_bytes(b"junk")
+        result = client.upload_deobfuscation_file("com.example.app", 100, str(f))
+        assert result.success is False
+        assert ".txt" in result.message
+
+    def test_happy_proguard(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        f = tmp_path / "mapping.txt"
+        f.write_text("# proguard mapping\n")
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-deob"}
+        edits.deobfuscationfiles.return_value.upload.return_value.execute.return_value = {
+            "deobfuscationFile": {"symbolType": "proguard"}
+        }
+
+        result = client.upload_deobfuscation_file(
+            "com.example.app", 100, str(f), file_type="proguard"
+        )
+
+        assert result.success is True
+        edits.commit.return_value.execute.assert_called_once()
+        upload_call = edits.deobfuscationfiles.return_value.upload.call_args
+        assert upload_call.kwargs["packageName"] == "com.example.app"
+        assert upload_call.kwargs["editId"] == "edit-deob"
+        assert upload_call.kwargs["apkVersionCode"] == 100
+        assert upload_call.kwargs["deobfuscationFileType"] == "proguard"
+
+    def test_failure_cleans_up_edit(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        f = tmp_path / "mapping.txt"
+        f.write_text("x")
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-x"}
+        edits.deobfuscationfiles.return_value.upload.return_value.execute.side_effect = (
+            _make_http_error(400, "bad mapping")
+        )
+
+        result = client.upload_deobfuscation_file("com.example.app", 100, str(f))
+
+        assert result.success is False
+        edits.commit.return_value.execute.assert_not_called()
+        edits.delete.assert_called_once_with(packageName="com.example.app", editId="edit-x")
+
+
+class TestListBundlesApks:
+    def test_list_bundles_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "e1"}
+        edits.bundles.return_value.list.return_value.execute.return_value = {
+            "bundles": [
+                {"versionCode": 100, "sha1": "a", "sha256": "b"},
+                {"versionCode": 101},
+            ]
+        }
+        result = client.list_bundles("com.example.app")
+        assert len(result) == 2
+        assert result[0].version_code == 100
+        assert result[0].sha256 == "b"
+        assert result[1].sha1 is None
+        edits.delete.return_value.execute.assert_called_once()
+
+    def test_list_apks_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "e2"}
+        edits.apks.return_value.list.return_value.execute.return_value = {
+            "apks": [
+                {"versionCode": 50, "binary": {"sha1": "x", "sha256": "y"}},
+                {"versionCode": 51},
+            ]
+        }
+        result = client.list_apks("com.example.app")
+        assert len(result) == 2
+        assert result[0].version_code == 50
+        assert result[0].sha1 == "x"
+        assert result[1].sha1 is None
+        edits.delete.return_value.execute.assert_called_once()
+
+    def test_list_bundles_http_error(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "e1"}
+        edits.bundles.return_value.list.return_value.execute.side_effect = _make_http_error(
+            403, "forbidden"
+        )
+        with pytest.raises(PlayStoreClientError):
+            client.list_bundles("com.example.app")
+        edits.delete.return_value.execute.assert_called_once()
+
+
+class TestCountryAvailability:
+    def test_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "e1"}
+        edits.countryavailability.return_value.get.return_value.execute.return_value = {
+            "restOfWorld": False,
+            "syncWithProduction": True,
+            "countries": [
+                {"country": "US"},
+                {"country": "GB"},
+            ],
+        }
+
+        ca = client.get_country_availability("com.example.app", "production")
+
+        assert ca.track == "production"
+        assert ca.rest_of_world is False
+        assert ca.sync_with_production is True
+        assert ca.countries == ["US", "GB"]
+
+
+class TestCreateCustomTrack:
+    def test_invalid_form_factor(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.create_custom_track("com.example.app", "qa-team", form_factor="MOBILE")
+        assert result.success is False
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_empty_track_rejected(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.create_custom_track("com.example.app", "")
+        assert result.success is False
+
+    def test_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-ct"}
+        edits.tracks.return_value.create.return_value.execute.return_value = None
+
+        result = client.create_custom_track("com.example.app", "qa-team", form_factor="DEFAULT")
+
+        assert result.success is True
+        edits.tracks.return_value.create.assert_called_once_with(
+            packageName="com.example.app",
+            editId="edit-ct",
+            body={
+                "type": "CLOSED_TESTING",
+                "formFactor": "DEFAULT",
+                "track": "qa-team",
+            },
+        )
+        edits.commit.return_value.execute.assert_called_once()
+
+    def test_failure_cleans_up(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-ct"}
+        edits.tracks.return_value.create.return_value.execute.side_effect = _make_http_error(
+            400, "duplicate"
+        )
+
+        result = client.create_custom_track("com.example.app", "qa-team")
+
+        assert result.success is False
+        edits.delete.assert_called_once_with(packageName="com.example.app", editId="edit-ct")
+
+
+class TestValidateEdit:
+    def test_empty_edit_id(self, client: PlayStoreClient) -> None:
+        result = client.validate_edit("com.example.app", "")
+        assert result.success is False
+        assert result.valid is False
+
+    def test_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.validate.return_value.execute.return_value = {}
+        result = client.validate_edit("com.example.app", "edit-1")
+        assert result.success is True
+        assert result.valid is True
+        edits.validate.assert_called_once_with(packageName="com.example.app", editId="edit-1")
+
+    def test_validation_failure_returns_valid_false(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.validate.return_value.execute.side_effect = _make_http_error(400, "broken")
+        result = client.validate_edit("com.example.app", "edit-1")
+        # API call was made successfully (success=True) but edit is not valid
+        assert result.success is True
+        assert result.valid is False
+        assert "Edit not valid" in result.message

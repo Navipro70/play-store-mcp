@@ -57,6 +57,17 @@ Complete reference for all MCP tools provided by the Play Store MCP server.
 | [`consume_product_purchase`](tools/purchases.md#consume_product_purchase) | Consume a consumable IAP |
 | [`refund_order`](tools/purchases.md#refund_order) | Refund (and optionally revoke) an order |
 
+## Edits Misc Tools
+
+| Tool | Description |
+|---|---|
+| [`upload_deobfuscation_file`](tools/edits-misc.md#upload_deobfuscation_file) | Upload mapping.txt or native debug symbols for an APK/AAB version |
+| [`list_bundles`](tools/edits-misc.md#list_bundles) | List uploaded AABs in a fresh edit |
+| [`list_apks`](tools/edits-misc.md#list_apks) | List uploaded APKs in a fresh edit |
+| [`get_country_availability`](tools/edits-misc.md#get_country_availability) | Read per-track country availability |
+| [`create_custom_track`](tools/edits-misc.md#create_custom_track) | Create a closed-testing track |
+| [`validate_edit`](tools/edits-misc.md#validate_edit) | Dry-run validate an existing edit |
+
 ## In-App Products Tools
 
 | Tool | Description |
