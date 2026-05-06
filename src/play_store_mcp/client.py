@@ -21,6 +21,7 @@ from googleapiclient.http import MediaFileUpload
 from play_store_mcp.models import (
     Apk,
     AppDetails,
+    BasePlan,
     BatchDeploymentResult,
     BatchImageUploadResult,
     Bundle,
@@ -34,6 +35,7 @@ from play_store_mcp.models import (
     InAppProduct,
     Listing,
     ListingUpdateResult,
+    OfferPhase,
     OnetimeProduct,
     OnetimeProductMutationResult,
     Order,
@@ -49,6 +51,9 @@ from play_store_mcp.models import (
     StoreImage,
     StoreImageDeleteResult,
     StoreImageUploadResult,
+    Subscription,
+    SubscriptionMutationResult,
+    SubscriptionOffer,
     SubscriptionProduct,
     SubscriptionPurchase,
     TesterInfo,
@@ -328,7 +333,7 @@ class PlayStoreClient:
     @staticmethod
     def _validate_iso8601_period(value: str) -> None:
         """Validate an ISO 8601 duration string (e.g. P1M, P1Y, P7D)."""
-        if not re.match(r"^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?$", value):
+        if not re.match(r"^P(?=\d)(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?$", value):
             raise ValueError(
                 f"billing_period must be ISO 8601 duration (e.g. P1M, P1Y, P7D), got: {value}"
             )
@@ -3156,3 +3161,822 @@ class PlayStoreClient:
                 )
             )
         return results
+
+    # =========================================================================
+    # Group #5: monetization.subscriptions + basePlans + offers
+    # =========================================================================
+
+    @staticmethod
+    def _validate_product_id(product_id: str) -> None:
+        if not product_id:
+            raise ValueError("product_id cannot be empty")
+        if not re.match(r"^[a-z0-9][a-z0-9_.]{0,39}$", product_id):
+            raise ValueError("product_id must be 1-40 chars of [a-z0-9_.]; got: " + product_id)
+
+    @staticmethod
+    def _validate_base_plan_id(base_plan_id: str) -> None:
+        if not base_plan_id:
+            raise ValueError("base_plan_id cannot be empty")
+        if not re.match(r"^[a-z0-9][a-z0-9\-]{0,62}$", base_plan_id):
+            raise ValueError(
+                "base_plan_id must start with [a-z0-9], contain only [a-z0-9-], "
+                f"≤63 chars; got: {base_plan_id}"
+            )
+
+    @staticmethod
+    def _validate_offer_id(offer_id: str) -> None:
+        if not offer_id:
+            raise ValueError("offer_id cannot be empty")
+        if not re.match(r"^[a-z0-9][a-z0-9\-]{0,62}$", offer_id):
+            raise ValueError(
+                "offer_id must start with [a-z0-9], contain only [a-z0-9-], "
+                f"≤63 chars; got: {offer_id}"
+            )
+
+    @staticmethod
+    def _base_plan_from_api(data: dict[str, Any]) -> BasePlan:
+        auto = data.get("autoRenewingBasePlanType") or {}
+        prepaid = data.get("prepaidBasePlanType") or {}
+        billing_period = auto.get("billingPeriodDuration") or prepaid.get("billingPeriodDuration")
+        return BasePlan(
+            base_plan_id=data.get("basePlanId", ""),
+            state=data.get("state", "DRAFT"),
+            auto_renewing=bool(data.get("autoRenewingBasePlanType")),
+            billing_period_duration=billing_period,
+            regional_configs=data.get("regionalConfigs", []) or [],
+            other_regions_config=data.get("otherRegionsConfig"),
+        )
+
+    @classmethod
+    def _subscription_from_api(
+        cls,
+        package_name: str,
+        product_id: str,
+        data: dict[str, Any],
+    ) -> Subscription:
+        listings: list[ProductLocalization] = [
+            ProductLocalization(
+                language_code=ln.get("languageCode", ""),
+                title=ln.get("title", ""),
+                description=ln.get("description") or "",
+            )
+            for ln in (data.get("listings", []) or [])
+            if isinstance(ln, dict)
+        ]
+        base_plans: list[BasePlan] = [
+            cls._base_plan_from_api(bp)
+            for bp in (data.get("basePlans", []) or [])
+            if isinstance(bp, dict)
+        ]
+        return Subscription(
+            package_name=package_name,
+            product_id=data.get("productId") or product_id,
+            archived=bool(data.get("archived", False)),
+            listings=listings,
+            base_plans=base_plans,
+            tax_and_compliance_settings=data.get("taxAndComplianceSettings"),
+        )
+
+    @staticmethod
+    def _offer_phases_from_api(phases: list[dict[str, Any]]) -> list[OfferPhase]:
+        result: list[OfferPhase] = []
+        for ph in phases or []:
+            if not isinstance(ph, dict):
+                continue
+            result.append(
+                OfferPhase(
+                    duration=ph.get("duration", ""),
+                    recurrence_count=int(ph.get("recurrenceCount", 1)),
+                    free=False,
+                    discount_percentage=None,
+                    regional_configs=ph.get("regionalConfigs", []) or [],
+                )
+            )
+        return result
+
+    @classmethod
+    def _offer_from_api(
+        cls,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        data: dict[str, Any],
+    ) -> SubscriptionOffer:
+        return SubscriptionOffer(
+            package_name=package_name,
+            product_id=data.get("productId") or product_id,
+            base_plan_id=data.get("basePlanId") or base_plan_id,
+            offer_id=data.get("offerId", ""),
+            state=data.get("state", "DRAFT"),
+            phases=cls._offer_phases_from_api(data.get("phases", []) or []),
+            targeting=data.get("targeting"),
+        )
+
+    # ---- Subscriptions CRUD ----
+
+    def list_subscription_products(
+        self,
+        package_name: str,
+    ) -> list[Subscription]:
+        """List all subscription products on the app."""
+        self._logger.info("Listing subscription products", package_name=package_name)
+        service = self._get_service()
+        try:
+            response = (
+                service.monetization().subscriptions().list(packageName=package_name).execute()
+            )
+            return [
+                self._subscription_from_api(package_name, item.get("productId", ""), item)
+                for item in (response.get("subscriptions", []) or [])
+                if isinstance(item, dict)
+            ]
+        except HttpError as e:
+            self._logger.exception("Failed to list subscriptions", error=str(e))
+            raise PlayStoreClientError(f"Failed to list subscriptions: {e.reason}") from e
+
+    def get_subscription_product(
+        self,
+        package_name: str,
+        product_id: str,
+    ) -> Subscription:
+        """Get a single subscription product."""
+        self._logger.info(
+            "Getting subscription product",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+        try:
+            data = (
+                service.monetization()
+                .subscriptions()
+                .get(packageName=package_name, productId=product_id)
+                .execute()
+            )
+            return self._subscription_from_api(package_name, product_id, data)
+        except HttpError as e:
+            self._logger.exception("Failed to get subscription", error=str(e))
+            raise PlayStoreClientError(f"Failed to get subscription: {e.reason}") from e
+
+    def create_subscription_product(
+        self,
+        package_name: str,
+        product_id: str,
+        listings: list[dict[str, str]],
+    ) -> SubscriptionMutationResult:
+        """Create a new subscription product (no base plans yet).
+
+        Base plans and offers are added separately via ``add_base_plan`` and
+        ``create_subscription_offer``.
+        """
+        try:
+            self._validate_product_id(product_id)
+        except ValueError as e:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="create",
+                message=str(e),
+                error="ValueError",
+            )
+        if not listings:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="create",
+                message="listings cannot be empty",
+                error="ValueError",
+            )
+        body = {
+            "productId": product_id,
+            "packageName": package_name,
+            "listings": [
+                {
+                    "languageCode": ln["language_code"],
+                    "title": ln["title"],
+                    "description": ln.get("description", ""),
+                }
+                for ln in listings
+            ],
+        }
+        self._logger.info(
+            "Creating subscription product",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+        try:
+            response = (
+                service.monetization()
+                .subscriptions()
+                .create(
+                    packageName=package_name,
+                    productId=product_id,
+                    body=body,
+                )
+                .execute()
+            )
+            sub = self._subscription_from_api(package_name, product_id, response or {})
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation="create",
+                subscription=sub,
+                message=f"Created subscription {product_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to create subscription", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="create",
+                message=f"Create failed: {e.reason}",
+                error=str(e),
+            )
+
+    def update_subscription_product(
+        self,
+        package_name: str,
+        product_id: str,
+        listings: list[dict[str, str]] | None = None,
+    ) -> SubscriptionMutationResult:
+        """Update listings of an existing subscription via PATCH."""
+        if not listings:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="update",
+                message="listings cannot be empty",
+                error="ValueError",
+            )
+        body = {
+            "productId": product_id,
+            "packageName": package_name,
+            "listings": [
+                {
+                    "languageCode": ln["language_code"],
+                    "title": ln["title"],
+                    "description": ln.get("description", ""),
+                }
+                for ln in listings
+            ],
+        }
+        self._logger.info(
+            "Updating subscription product",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+        try:
+            response = (
+                service.monetization()
+                .subscriptions()
+                .patch(
+                    packageName=package_name,
+                    productId=product_id,
+                    body=body,
+                    updateMask="listings",
+                )
+                .execute()
+            )
+            sub = self._subscription_from_api(package_name, product_id, response or {})
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation="update",
+                subscription=sub,
+                message=f"Updated subscription {product_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to update subscription", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="update",
+                message=f"Update failed: {e.reason}",
+                error=str(e),
+            )
+
+    def archive_subscription_product(
+        self,
+        package_name: str,
+        product_id: str,
+    ) -> SubscriptionMutationResult:
+        """Archive a subscription product (`monetization.subscriptions.archive`)."""
+        self._logger.info(
+            "Archiving subscription",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+        try:
+            response = (
+                service.monetization()
+                .subscriptions()
+                .archive(
+                    packageName=package_name,
+                    productId=product_id,
+                    body={},
+                )
+                .execute()
+            )
+            sub = self._subscription_from_api(package_name, product_id, response or {})
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation="archive",
+                subscription=sub,
+                message=f"Archived subscription {product_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to archive subscription", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="archive",
+                message=f"Archive failed: {e.reason}",
+                error=str(e),
+            )
+
+    # ---- Base plans ----
+
+    def add_base_plan(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        billing_period_duration: str,
+        regional_configs: list[dict[str, Any]],
+        auto_renewing: bool = True,
+    ) -> SubscriptionMutationResult:
+        """Add a base plan to an existing subscription via PATCH.
+
+        Reads the current subscription, appends the new BasePlan, and PATCHes
+        with ``updateMask=basePlans``.
+        """
+        try:
+            self._validate_base_plan_id(base_plan_id)
+            self._validate_iso8601_period(billing_period_duration)
+        except ValueError as e:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="add_base_plan",
+                message=str(e),
+                error="ValueError",
+            )
+        if not regional_configs:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="add_base_plan",
+                message="regional_configs cannot be empty",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Adding base plan",
+            package_name=package_name,
+            product_id=product_id,
+            base_plan_id=base_plan_id,
+            billing_period=billing_period_duration,
+        )
+        service = self._get_service()
+        try:
+            current = (
+                service.monetization()
+                .subscriptions()
+                .get(packageName=package_name, productId=product_id)
+                .execute()
+            ) or {}
+
+            existing = list(current.get("basePlans", []) or [])
+            new_plan: dict[str, Any] = {
+                "basePlanId": base_plan_id,
+                "regionalConfigs": regional_configs,
+                "offerTags": [],
+            }
+            if auto_renewing:
+                new_plan["autoRenewingBasePlanType"] = {
+                    "billingPeriodDuration": billing_period_duration,
+                }
+            else:
+                new_plan["prepaidBasePlanType"] = {
+                    "billingPeriodDuration": billing_period_duration,
+                }
+            existing.append(new_plan)
+
+            body = {
+                "productId": product_id,
+                "packageName": package_name,
+                "basePlans": existing,
+            }
+            response = (
+                service.monetization()
+                .subscriptions()
+                .patch(
+                    packageName=package_name,
+                    productId=product_id,
+                    body=body,
+                    updateMask="basePlans",
+                )
+                .execute()
+            )
+            sub = self._subscription_from_api(package_name, product_id, response or {})
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="add_base_plan",
+                subscription=sub,
+                message=f"Added base plan {base_plan_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to add base plan", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="add_base_plan",
+                message=f"add_base_plan failed: {e.reason}",
+                error=str(e),
+            )
+
+    def _set_base_plan_state(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        activate: bool,
+    ) -> SubscriptionMutationResult:
+        op = "activate_base_plan" if activate else "deactivate_base_plan"
+        try:
+            self._validate_base_plan_id(base_plan_id)
+        except ValueError as e:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation=op,
+                message=str(e),
+                error="ValueError",
+            )
+        self._logger.info(
+            op,
+            package_name=package_name,
+            product_id=product_id,
+            base_plan_id=base_plan_id,
+        )
+        service = self._get_service()
+        method = service.monetization().subscriptions().basePlans()
+        api_call = method.activate if activate else method.deactivate
+        body = {
+            "packageName": package_name,
+            "productId": product_id,
+            "basePlanId": base_plan_id,
+        }
+        try:
+            api_call(
+                packageName=package_name,
+                productId=product_id,
+                basePlanId=base_plan_id,
+                body=body,
+            ).execute()
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation=op,
+                message=f"{op} ok",
+            )
+        except HttpError as e:
+            self._logger.exception(f"{op} failed", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation=op,
+                message=f"{op} failed: {e.reason}",
+                error=str(e),
+            )
+
+    def activate_base_plan(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+    ) -> SubscriptionMutationResult:
+        return self._set_base_plan_state(package_name, product_id, base_plan_id, True)
+
+    def deactivate_base_plan(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+    ) -> SubscriptionMutationResult:
+        return self._set_base_plan_state(package_name, product_id, base_plan_id, False)
+
+    def migrate_base_plan_prices(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        regional_price_migrations: list[dict[str, Any]],
+    ) -> SubscriptionMutationResult:
+        """Migrate existing subscribers to new regional prices."""
+        if not regional_price_migrations:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="migrate_base_plan_prices",
+                message="regional_price_migrations cannot be empty",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Migrating base plan prices",
+            package_name=package_name,
+            product_id=product_id,
+            base_plan_id=base_plan_id,
+        )
+        service = self._get_service()
+        body = {
+            "packageName": package_name,
+            "productId": product_id,
+            "basePlanId": base_plan_id,
+            "regionalPriceMigrations": regional_price_migrations,
+        }
+        try:
+            (
+                service.monetization()
+                .subscriptions()
+                .basePlans()
+                .migratePrices(
+                    packageName=package_name,
+                    productId=product_id,
+                    basePlanId=base_plan_id,
+                    body=body,
+                )
+                .execute()
+            )
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="migrate_base_plan_prices",
+                message=f"Migrated prices for base plan {base_plan_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("migrate_base_plan_prices failed", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                operation="migrate_base_plan_prices",
+                message=f"Migration failed: {e.reason}",
+                error=str(e),
+            )
+
+    # ---- Offers ----
+
+    def list_subscription_offers(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+    ) -> list[SubscriptionOffer]:
+        """List subscription offers under a base plan."""
+        self._logger.info(
+            "Listing subscription offers",
+            package_name=package_name,
+            product_id=product_id,
+            base_plan_id=base_plan_id,
+        )
+        service = self._get_service()
+        try:
+            response = (
+                service.monetization()
+                .subscriptions()
+                .basePlans()
+                .offers()
+                .list(
+                    packageName=package_name,
+                    productId=product_id,
+                    basePlanId=base_plan_id,
+                )
+                .execute()
+            )
+            return [
+                self._offer_from_api(package_name, product_id, base_plan_id, item)
+                for item in (response.get("subscriptionOffers", []) or [])
+                if isinstance(item, dict)
+            ]
+        except HttpError as e:
+            self._logger.exception("Failed to list offers", error=str(e))
+            raise PlayStoreClientError(f"Failed to list offers: {e.reason}") from e
+
+    def create_subscription_offer(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        offer_id: str,
+        phases: list[dict[str, Any]],
+        regional_configs: list[dict[str, Any]],
+    ) -> SubscriptionMutationResult:
+        """Create a subscription offer under a base plan."""
+        try:
+            self._validate_offer_id(offer_id)
+        except ValueError as e:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation="create_subscription_offer",
+                message=str(e),
+                error="ValueError",
+            )
+        if not phases:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation="create_subscription_offer",
+                message="phases cannot be empty (1-2 entries required)",
+                error="ValueError",
+            )
+        if not regional_configs:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation="create_subscription_offer",
+                message="regional_configs cannot be empty",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Creating subscription offer",
+            package_name=package_name,
+            product_id=product_id,
+            base_plan_id=base_plan_id,
+            offer_id=offer_id,
+        )
+        service = self._get_service()
+        body = {
+            "packageName": package_name,
+            "productId": product_id,
+            "basePlanId": base_plan_id,
+            "offerId": offer_id,
+            "phases": phases,
+            "regionalConfigs": regional_configs,
+        }
+        try:
+            response = (
+                service.monetization()
+                .subscriptions()
+                .basePlans()
+                .offers()
+                .create(
+                    packageName=package_name,
+                    productId=product_id,
+                    basePlanId=base_plan_id,
+                    offerId=offer_id,
+                    body=body,
+                )
+                .execute()
+            )
+            offer = self._offer_from_api(package_name, product_id, base_plan_id, response or {})
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation="create_subscription_offer",
+                offer=offer,
+                message=f"Created offer {offer_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to create offer", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation="create_subscription_offer",
+                message=f"Create offer failed: {e.reason}",
+                error=str(e),
+            )
+
+    def _set_offer_state(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        offer_id: str,
+        activate: bool,
+    ) -> SubscriptionMutationResult:
+        op = "activate_subscription_offer" if activate else "deactivate_subscription_offer"
+        try:
+            self._validate_offer_id(offer_id)
+        except ValueError as e:
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation=op,
+                message=str(e),
+                error="ValueError",
+            )
+        self._logger.info(
+            op,
+            package_name=package_name,
+            product_id=product_id,
+            base_plan_id=base_plan_id,
+            offer_id=offer_id,
+        )
+        service = self._get_service()
+        offers = service.monetization().subscriptions().basePlans().offers()
+        api_call = offers.activate if activate else offers.deactivate
+        body = {
+            "packageName": package_name,
+            "productId": product_id,
+            "basePlanId": base_plan_id,
+            "offerId": offer_id,
+        }
+        try:
+            api_call(
+                packageName=package_name,
+                productId=product_id,
+                basePlanId=base_plan_id,
+                offerId=offer_id,
+                body=body,
+            ).execute()
+            return SubscriptionMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation=op,
+                message=f"{op} ok",
+            )
+        except HttpError as e:
+            self._logger.exception(f"{op} failed", error=str(e))
+            return SubscriptionMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                base_plan_id=base_plan_id,
+                offer_id=offer_id,
+                operation=op,
+                message=f"{op} failed: {e.reason}",
+                error=str(e),
+            )
+
+    def activate_subscription_offer(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        offer_id: str,
+    ) -> SubscriptionMutationResult:
+        return self._set_offer_state(package_name, product_id, base_plan_id, offer_id, True)
+
+    def deactivate_subscription_offer(
+        self,
+        package_name: str,
+        product_id: str,
+        base_plan_id: str,
+        offer_id: str,
+    ) -> SubscriptionMutationResult:
+        return self._set_offer_state(package_name, product_id, base_plan_id, offer_id, False)

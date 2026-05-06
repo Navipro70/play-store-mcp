@@ -88,6 +88,24 @@ Complete reference for all MCP tools provided by the Play Store MCP server.
 | [`deactivate_onetime_product`](tools/onetime-products.md#deactivate_onetime_product) | Deactivate a purchase option |
 | [`batch_create_onetime_products`](tools/onetime-products.md#batch_create_onetime_products) | Create or update many at once |
 
+## Subscription Products (basePlans + offers)
+
+| Tool | Description |
+|---|---|
+| [`list_subscription_products`](tools/subscription-products.md#list_subscription_products) | List all subscription products |
+| [`get_subscription_product`](tools/subscription-products.md#get_subscription_product) | Get one subscription product |
+| [`create_subscription_product`](tools/subscription-products.md#create_subscription_product) | Create a top-level subscription |
+| [`update_subscription_product`](tools/subscription-products.md#update_subscription_product) | Update listings |
+| [`archive_subscription_product`](tools/subscription-products.md#archive_subscription_product) | Archive a subscription |
+| [`add_base_plan`](tools/subscription-products.md#add_base_plan) | Add a base plan |
+| [`activate_base_plan`](tools/subscription-products.md#activate_base_plan) | Activate a base plan |
+| [`deactivate_base_plan`](tools/subscription-products.md#deactivate_base_plan) | Deactivate a base plan |
+| [`migrate_base_plan_prices`](tools/subscription-products.md#migrate_base_plan_prices) | Migrate existing subscribers to new prices |
+| [`list_subscription_offers`](tools/subscription-products.md#list_subscription_offers) | List offers under a base plan |
+| [`create_subscription_offer`](tools/subscription-products.md#create_subscription_offer) | Create a new offer (intro / trial / discount) |
+| [`activate_subscription_offer`](tools/subscription-products.md#activate_subscription_offer) | Activate an offer |
+| [`deactivate_subscription_offer`](tools/subscription-products.md#deactivate_subscription_offer) | Deactivate an offer |
+
 ## Testers Tools
 
 | Tool | Description |

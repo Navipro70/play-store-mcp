@@ -1448,3 +1448,267 @@ class TestBatchCreateOnetimeProductsTool:
         assert result["success"] is False
         assert result["successful_count"] == 1
         assert result["failed_count"] == 1
+
+
+# =========================================================================
+# Group #5 — server tools
+# =========================================================================
+
+
+from play_store_mcp.models import (  # noqa: E402
+    Subscription as _Subscription,
+)
+from play_store_mcp.models import (  # noqa: E402
+    SubscriptionMutationResult as _SubscriptionMutationResult,
+)
+from play_store_mcp.models import (  # noqa: E402
+    SubscriptionOffer as _SubscriptionOffer,
+)
+from play_store_mcp.server import (  # noqa: E402
+    activate_base_plan,
+    activate_subscription_offer,
+    add_base_plan,
+    archive_subscription_product,
+    create_subscription_offer,
+    create_subscription_product,
+    deactivate_base_plan,
+    deactivate_subscription_offer,
+    get_subscription_product,
+    list_subscription_offers,
+    list_subscription_products,
+    migrate_base_plan_prices,
+    update_subscription_product,
+)
+
+
+class TestSubscriptionProductTools:
+    def test_list_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.list_subscription_products.return_value = [
+            _Subscription(package_name="com.example.app", product_id="premium")
+        ]
+        result = list_subscription_products(package_name="com.example.app")
+        assert result["success"] is True
+        assert len(result["products"]) == 1
+
+    def test_get_empty_id(self, mock_client: MagicMock) -> None:
+        result = get_subscription_product(package_name="com.example.app", product_id="")
+        assert result["success"] is False
+        mock_client.get_subscription_product.assert_not_called()
+
+    def test_create_empty_listings(self, mock_client: MagicMock) -> None:
+        result = create_subscription_product(
+            package_name="com.example.app",
+            product_id="premium",
+            listings=[],
+        )
+        assert result["success"] is False
+        mock_client.create_subscription_product.assert_not_called()
+
+    def test_update_empty_id(self, mock_client: MagicMock) -> None:
+        result = update_subscription_product(
+            package_name="com.example.app",
+            product_id="",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+        )
+        assert result["success"] is False
+        mock_client.update_subscription_product.assert_not_called()
+
+    def test_archive_empty_id(self, mock_client: MagicMock) -> None:
+        result = archive_subscription_product(package_name="com.example.app", product_id="")
+        assert result["success"] is False
+        mock_client.archive_subscription_product.assert_not_called()
+
+    def test_archive_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.archive_subscription_product.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            operation="archive",
+            message="ok",
+        )
+        result = archive_subscription_product(package_name="com.example.app", product_id="premium")
+        assert result["success"] is True
+
+
+class TestBasePlanTools:
+    def test_add_invalid_period(self, mock_client: MagicMock) -> None:
+        result = add_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            billing_period_duration="1month",
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is False
+        mock_client.add_base_plan.assert_not_called()
+
+    def test_add_empty_regional(self, mock_client: MagicMock) -> None:
+        result = add_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            billing_period_duration="P1M",
+            regional_configs=[],
+        )
+        assert result["success"] is False
+        mock_client.add_base_plan.assert_not_called()
+
+    def test_add_happy(self, mock_client: MagicMock) -> None:
+        mock_client.add_base_plan.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            operation="add_base_plan",
+            message="ok",
+        )
+        result = add_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            billing_period_duration="P1M",
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is True
+
+    def test_activate_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.activate_base_plan.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            operation="activate_base_plan",
+            message="ok",
+        )
+        result = activate_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+        )
+        assert result["success"] is True
+
+    def test_deactivate_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.deactivate_base_plan.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            operation="deactivate_base_plan",
+            message="ok",
+        )
+        result = deactivate_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+        )
+        assert result["success"] is True
+
+    def test_migrate_empty_rejected(self, mock_client: MagicMock) -> None:
+        result = migrate_base_plan_prices(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            regional_price_migrations=[],
+        )
+        assert result["success"] is False
+        mock_client.migrate_base_plan_prices.assert_not_called()
+
+
+class TestOfferTools:
+    def test_list_offers(self, mock_client: MagicMock) -> None:
+        mock_client.list_subscription_offers.return_value = [
+            _SubscriptionOffer(
+                package_name="com.example.app",
+                product_id="premium",
+                base_plan_id="monthly",
+                offer_id="trial",
+                state="ACTIVE",
+            )
+        ]
+        result = list_subscription_offers(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+        )
+        assert result["success"] is True
+        assert len(result["offers"]) == 1
+
+    def test_create_offer_empty_phases(self, mock_client: MagicMock) -> None:
+        result = create_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            phases=[],
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is False
+        mock_client.create_subscription_offer.assert_not_called()
+
+    def test_create_offer_too_many_phases(self, mock_client: MagicMock) -> None:
+        result = create_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            phases=[{}, {}, {}],
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is False
+        mock_client.create_subscription_offer.assert_not_called()
+
+    def test_create_offer_happy(self, mock_client: MagicMock) -> None:
+        mock_client.create_subscription_offer.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            operation="create_subscription_offer",
+            message="ok",
+        )
+        result = create_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            phases=[{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is True
+
+    def test_activate_offer(self, mock_client: MagicMock) -> None:
+        mock_client.activate_subscription_offer.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            operation="activate_subscription_offer",
+            message="ok",
+        )
+        result = activate_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+        )
+        assert result["success"] is True
+
+    def test_deactivate_offer(self, mock_client: MagicMock) -> None:
+        mock_client.deactivate_subscription_offer.return_value = _SubscriptionMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            operation="deactivate_subscription_offer",
+            message="ok",
+        )
+        result = deactivate_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+        )
+        assert result["success"] is True

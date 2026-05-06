@@ -1710,6 +1710,320 @@ def batch_create_onetime_products(
 
 
 # =============================================================================
+# Group #5: monetization.subscriptions + basePlans + offers
+# =============================================================================
+
+
+_ISO8601_PERIOD_RE = re.compile(r"^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?$")
+
+
+@mcp.tool()
+def list_subscription_products(package_name: str) -> dict[str, Any]:
+    """List all subscription products defined in the monetization API.
+
+    This is the **product** view (Subscription objects with base plans and
+    offers), not the runtime purchase view. For a specific user's
+    subscription state, use `get_subscription_status`.
+
+    Args:
+        package_name: App package name.
+
+    Returns:
+        Dict with `success`, `products` (list of Subscription dicts).
+    """
+    client = get_client_from_context()
+    try:
+        products = client.list_subscription_products(package_name)
+        return {
+            "success": True,
+            "package_name": package_name,
+            "products": [p.model_dump() for p in products],
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def get_subscription_product(
+    package_name: str,
+    product_id: str,
+) -> dict[str, Any]:
+    """Get one subscription product by ID."""
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+    client = get_client_from_context()
+    try:
+        sub = client.get_subscription_product(package_name, product_id)
+        return {"success": True, **sub.model_dump()}
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_subscription_product(
+    package_name: str,
+    product_id: str,
+    listings: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Create a new subscription product (without base plans).
+
+    Subscriptions in the modern monetization API are 3-level:
+    Subscription -> BasePlan -> Offer. This tool creates the top-level
+    product. Add base plans via `add_base_plan` and offers via
+    `create_subscription_offer`.
+
+    Args:
+        package_name: App package name.
+        product_id: 1-40 chars, lowercase letters/numbers/underscore/dot.
+        listings: List of {language_code, title, description}. At least one
+            entry. Title and description are plain text.
+
+    Returns:
+        Dict with `success`, `subscription`, `message`, `error`.
+    """
+    if not isinstance(listings, list) or not listings:
+        return {"success": False, "error": "listings must be a non-empty list"}
+
+    client = get_client_from_context()
+    result = client.create_subscription_product(package_name, product_id, listings)
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_subscription_product(
+    package_name: str,
+    product_id: str,
+    listings: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Update an existing subscription's listings via PATCH.
+
+    Only `listings` are updated by this tool (`updateMask=listings`). Use
+    `add_base_plan` for base-plan changes and the offer tools for offers.
+
+    Args:
+        package_name: App package name.
+        product_id: Product ID.
+        listings: New listings list.
+
+    Returns:
+        Dict with `success`, `subscription`, `message`, `error`.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+    if not isinstance(listings, list) or not listings:
+        return {"success": False, "error": "listings must be a non-empty list"}
+
+    client = get_client_from_context()
+    result = client.update_subscription_product(package_name, product_id, listings)
+    return result.model_dump()
+
+
+@mcp.tool()
+def archive_subscription_product(
+    package_name: str,
+    product_id: str,
+) -> dict[str, Any]:
+    """Archive a subscription product (`monetization.subscriptions.archive`).
+
+    Existing subscribers keep their access; new subscriptions can no longer
+    be sold. Archive is reversible.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+    client = get_client_from_context()
+    result = client.archive_subscription_product(package_name, product_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def add_base_plan(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+    billing_period_duration: str,
+    regional_configs: list[dict[str, Any]],
+    auto_renewing: bool = True,
+) -> dict[str, Any]:
+    """Add a base plan to an existing subscription.
+
+    Reads the current subscription, appends the new base plan, then PATCHes
+    with `updateMask=basePlans`. Always run while the subscription is in
+    DRAFT or ACTIVE.
+
+    Args:
+        package_name: App package name.
+        product_id: Subscription product ID.
+        base_plan_id: New base plan ID. Pattern: `[a-z0-9-]`, ≤63 chars.
+        billing_period_duration: ISO 8601 duration. Common values: P1W, P1M,
+            P3M, P6M, P1Y. Common invalid: "monthly", "1month".
+        regional_configs: List of {regionCode, price: {currencyCode, units,
+            nanos}, newSubscriberAvailability}. Pre-built; this tool does
+            not auto-convert from a single USD price.
+        auto_renewing: True (default) for auto-renewing subscriptions, False
+            for prepaid.
+
+    Returns:
+        Dict with `success`, `subscription`, `message`, `error`.
+    """
+    if not _ISO8601_PERIOD_RE.match(billing_period_duration):
+        return {
+            "success": False,
+            "error": (
+                "billing_period_duration must be ISO 8601 (e.g. P1M, P1Y, P7D); "
+                f"got: {billing_period_duration}"
+            ),
+        }
+    if not isinstance(regional_configs, list) or not regional_configs:
+        return {"success": False, "error": "regional_configs must be non-empty list"}
+
+    client = get_client_from_context()
+    result = client.add_base_plan(
+        package_name,
+        product_id,
+        base_plan_id,
+        billing_period_duration,
+        regional_configs,
+        auto_renewing,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def activate_base_plan(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+) -> dict[str, Any]:
+    """Activate a base plan (`subscriptions.basePlans.activate`)."""
+    client = get_client_from_context()
+    result = client.activate_base_plan(package_name, product_id, base_plan_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def deactivate_base_plan(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+) -> dict[str, Any]:
+    """Deactivate a base plan (`subscriptions.basePlans.deactivate`)."""
+    client = get_client_from_context()
+    result = client.deactivate_base_plan(package_name, product_id, base_plan_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def migrate_base_plan_prices(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+    regional_price_migrations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Migrate existing subscribers to new base plan prices.
+
+    Each entry in `regional_price_migrations` is a
+    `RegionalPriceMigrationConfig` dict per Discovery — required fields
+    typically include `regionCode`, `oldestAllowedPriceVersionTime`, and
+    `priceIncreaseType`.
+    """
+    if not isinstance(regional_price_migrations, list) or not regional_price_migrations:
+        return {
+            "success": False,
+            "error": "regional_price_migrations must be non-empty list",
+        }
+    client = get_client_from_context()
+    result = client.migrate_base_plan_prices(
+        package_name, product_id, base_plan_id, regional_price_migrations
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def list_subscription_offers(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+) -> dict[str, Any]:
+    """List subscription offers under a base plan."""
+    client = get_client_from_context()
+    try:
+        offers = client.list_subscription_offers(package_name, product_id, base_plan_id)
+        return {
+            "success": True,
+            "package_name": package_name,
+            "product_id": product_id,
+            "base_plan_id": base_plan_id,
+            "offers": [o.model_dump() for o in offers],
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_subscription_offer(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+    offer_id: str,
+    phases: list[dict[str, Any]],
+    regional_configs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create a subscription offer (intro / trial / discount).
+
+    Args:
+        package_name: App package name.
+        product_id: Subscription product ID.
+        base_plan_id: Parent base plan ID.
+        offer_id: New offer ID. Pattern: `[a-z0-9-]`, ≤63 chars.
+        phases: 1-2 phases. Each phase is a dict with `duration` (ISO 8601),
+            `recurrenceCount`, and `regionalConfigs`. The first phase is the
+            promotional one (e.g. free trial); the second can be a
+            full-price recurrence.
+        regional_configs: Per-region availability for the offer (list of
+            {regionCode, newSubscriberAvailability}).
+
+    Returns:
+        Dict with `success`, `offer`, `message`, `error`.
+    """
+    if not isinstance(phases, list) or not phases:
+        return {"success": False, "error": "phases must be 1-2 non-empty list"}
+    if len(phases) > 2:
+        return {"success": False, "error": "phases must contain at most 2 entries"}
+
+    client = get_client_from_context()
+    result = client.create_subscription_offer(
+        package_name, product_id, base_plan_id, offer_id, phases, regional_configs
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def activate_subscription_offer(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+    offer_id: str,
+) -> dict[str, Any]:
+    """Activate a subscription offer (`offers.activate`)."""
+    client = get_client_from_context()
+    result = client.activate_subscription_offer(package_name, product_id, base_plan_id, offer_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def deactivate_subscription_offer(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+    offer_id: str,
+) -> dict[str, Any]:
+    """Deactivate a subscription offer (`offers.deactivate`)."""
+    client = get_client_from_context()
+    result = client.deactivate_subscription_offer(package_name, product_id, base_plan_id, offer_id)
+    return result.model_dump()
+
+
+# =============================================================================
 # HTTP Endpoints for Streamable Transport
 # =============================================================================
 

@@ -2476,3 +2476,409 @@ class TestBatchCreateOnetimeProducts:
         assert len(results) == 1
         assert results[0].success is False
         assert "product_id" in results[0].message
+
+
+# =========================================================================
+# Group #5 — subscriptions / basePlans / offers
+# =========================================================================
+
+
+class TestSubscriptionIdValidators:
+    @pytest.mark.parametrize(
+        "v",
+        ["premium", "premium_yearly", "x.y.z", "p1.m"],
+    )
+    def test_product_id_valid(self, v: str) -> None:
+        PlayStoreClient._validate_product_id(v)
+
+    @pytest.mark.parametrize(
+        "v",
+        ["", "Has-Upper", "x" * 41, "x-1"],
+    )
+    def test_product_id_invalid(self, v: str) -> None:
+        with pytest.raises(ValueError):
+            PlayStoreClient._validate_product_id(v)
+
+    @pytest.mark.parametrize("v", ["P1M", "P1Y", "P7D", "P3M", "P12M"])
+    def test_iso8601_period_valid(self, v: str) -> None:
+        PlayStoreClient._validate_iso8601_period(v)
+
+    @pytest.mark.parametrize(
+        "v",
+        ["1month", "P", "monthly", "M1"],
+    )
+    def test_iso8601_period_invalid(self, v: str) -> None:
+        with pytest.raises(ValueError):
+            PlayStoreClient._validate_iso8601_period(v)
+
+
+class TestListGetSubscriptionProducts:
+    def test_list_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.subscriptions.return_value.list.return_value.execute.return_value = {
+            "subscriptions": [
+                {
+                    "productId": "premium_monthly",
+                    "archived": False,
+                    "listings": [
+                        {
+                            "languageCode": "en-US",
+                            "title": "Premium",
+                            "description": "Monthly",
+                        }
+                    ],
+                    "basePlans": [
+                        {
+                            "basePlanId": "monthly",
+                            "state": "ACTIVE",
+                            "autoRenewingBasePlanType": {
+                                "billingPeriodDuration": "P1M",
+                            },
+                            "regionalConfigs": [],
+                        }
+                    ],
+                }
+            ]
+        }
+        subs = client.list_subscription_products("com.example.app")
+        assert len(subs) == 1
+        assert subs[0].product_id == "premium_monthly"
+        assert subs[0].archived is False
+        assert subs[0].base_plans[0].auto_renewing is True
+        assert subs[0].base_plans[0].billing_period_duration == "P1M"
+
+    def test_get_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.subscriptions.return_value.get.return_value.execute.return_value = {
+            "productId": "premium",
+            "listings": [],
+            "basePlans": [],
+        }
+        sub = client.get_subscription_product("com.example.app", "premium")
+        assert sub.product_id == "premium"
+
+
+class TestSubscriptionMutations:
+    def test_create_invalid_product_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.create_subscription_product(
+            "com.example.app",
+            "Has-Upper",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+        )
+        assert result.success is False
+        _mock_service.monetization.return_value.subscriptions.return_value.create.assert_not_called()
+
+    def test_create_empty_listings(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.create_subscription_product("com.example.app", "premium", listings=[])
+        assert result.success is False
+
+    def test_create_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.subscriptions.return_value.create.return_value.execute.return_value = {
+            "productId": "premium",
+            "listings": [],
+            "basePlans": [],
+        }
+        result = client.create_subscription_product(
+            "com.example.app",
+            "premium",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+        )
+        assert result.success is True
+        body = _mock_service.monetization.return_value.subscriptions.return_value.create.call_args.kwargs[
+            "body"
+        ]
+        assert body["productId"] == "premium"
+        assert body["listings"][0]["languageCode"] == "en-US"
+
+    def test_update_calls_patch_with_listings_mask(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.subscriptions.return_value.patch.return_value.execute.return_value = {
+            "productId": "premium",
+            "listings": [],
+            "basePlans": [],
+        }
+        result = client.update_subscription_product(
+            "com.example.app",
+            "premium",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+        )
+        assert result.success is True
+        patch_call = (
+            _mock_service.monetization.return_value.subscriptions.return_value.patch.call_args
+        )
+        assert patch_call.kwargs["updateMask"] == "listings"
+
+    def test_archive_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.subscriptions.return_value.archive.return_value.execute.return_value = {
+            "productId": "premium",
+            "archived": True,
+            "listings": [],
+            "basePlans": [],
+        }
+        result = client.archive_subscription_product("com.example.app", "premium")
+        assert result.success is True
+        assert result.subscription is not None
+        assert result.subscription.archived is True
+
+
+class TestBasePlans:
+    def test_add_base_plan_validation(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.add_base_plan(
+            "com.example.app",
+            "premium",
+            "BAD-ID",
+            "P1M",
+            regional_configs=[
+                {
+                    "regionCode": "US",
+                    "price": {"currencyCode": "USD", "units": "9", "nanos": 990000000},
+                }
+            ],
+        )
+        assert result.success is False
+        _mock_service.monetization.return_value.subscriptions.return_value.get.assert_not_called()
+
+    def test_add_base_plan_invalid_period(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.add_base_plan(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "1month",
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result.success is False
+
+    def test_add_base_plan_empty_regional(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.add_base_plan(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "P1M",
+            regional_configs=[],
+        )
+        assert result.success is False
+
+    def test_add_base_plan_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        # Mock the read of current sub
+        _mock_service.monetization.return_value.subscriptions.return_value.get.return_value.execute.return_value = {
+            "productId": "premium",
+            "basePlans": [],
+        }
+        # Mock the patch
+        _mock_service.monetization.return_value.subscriptions.return_value.patch.return_value.execute.return_value = {
+            "productId": "premium",
+            "listings": [],
+            "basePlans": [
+                {
+                    "basePlanId": "monthly",
+                    "state": "DRAFT",
+                    "autoRenewingBasePlanType": {"billingPeriodDuration": "P1M"},
+                    "regionalConfigs": [],
+                }
+            ],
+        }
+
+        result = client.add_base_plan(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "P1M",
+            regional_configs=[
+                {
+                    "regionCode": "US",
+                    "price": {"currencyCode": "USD", "units": "9", "nanos": 990000000},
+                }
+            ],
+        )
+
+        assert result.success is True
+        patch_call = (
+            _mock_service.monetization.return_value.subscriptions.return_value.patch.call_args
+        )
+        assert patch_call.kwargs["updateMask"] == "basePlans"
+        new_plan = patch_call.kwargs["body"]["basePlans"][0]
+        assert new_plan["basePlanId"] == "monthly"
+        assert new_plan["autoRenewingBasePlanType"]["billingPeriodDuration"] == "P1M"
+
+    def test_activate_base_plan_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        bp = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value
+        bp.activate.return_value.execute.return_value = None
+
+        result = client.activate_base_plan("com.example.app", "premium", "monthly")
+
+        assert result.success is True
+        bp.activate.assert_called_once()
+
+    def test_deactivate_base_plan_invalid_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.deactivate_base_plan("com.example.app", "premium", "BAD")
+        assert result.success is False
+
+    def test_migrate_prices_empty_rejected(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.migrate_base_plan_prices("com.example.app", "premium", "monthly", [])
+        assert result.success is False
+
+
+class TestSubscriptionOffers:
+    def test_list_offers_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        offers.list.return_value.execute.return_value = {
+            "subscriptionOffers": [
+                {
+                    "offerId": "trial",
+                    "basePlanId": "monthly",
+                    "productId": "premium",
+                    "state": "ACTIVE",
+                    "phases": [{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+                }
+            ]
+        }
+        result = client.list_subscription_offers("com.example.app", "premium", "monthly")
+        assert len(result) == 1
+        assert result[0].offer_id == "trial"
+        assert len(result[0].phases) == 1
+
+    def test_create_offer_invalid_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.create_subscription_offer(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "BAD",
+            phases=[{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+            regional_configs=[{"regionCode": "US", "newSubscriberAvailability": True}],
+        )
+        assert result.success is False
+
+    def test_create_offer_empty_phases(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.create_subscription_offer(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "trial",
+            phases=[],
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result.success is False
+
+    def test_create_offer_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        offers.create.return_value.execute.return_value = {
+            "offerId": "trial",
+            "basePlanId": "monthly",
+            "productId": "premium",
+            "state": "DRAFT",
+            "phases": [{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+        }
+        result = client.create_subscription_offer(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "trial",
+            phases=[{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+            regional_configs=[{"regionCode": "US", "newSubscriberAvailability": True}],
+        )
+        assert result.success is True
+        assert result.offer is not None
+        assert result.offer.offer_id == "trial"
+
+    def test_activate_offer_invalid_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.activate_subscription_offer("com.example.app", "premium", "monthly", "BAD")
+        assert result.success is False
+
+    def test_activate_offer_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        offers.activate.return_value.execute.return_value = None
+
+        result = client.activate_subscription_offer(
+            "com.example.app", "premium", "monthly", "trial"
+        )
+        assert result.success is True
+
+    def test_deactivate_offer_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        offers.deactivate.return_value.execute.return_value = None
+
+        result = client.deactivate_subscription_offer(
+            "com.example.app", "premium", "monthly", "trial"
+        )
+        assert result.success is True
