@@ -1279,3 +1279,172 @@ class TestValidateEditTool:
         result = validate_edit_tool(package_name="com.example.app", edit_id="e1")
         assert result["success"] is True
         assert result["valid"] is True
+
+
+# =========================================================================
+# Group #2 — server tools
+# =========================================================================
+
+
+from play_store_mcp.models import (  # noqa: E402
+    OnetimeProduct as _OnetimeProduct,
+)
+from play_store_mcp.models import (  # noqa: E402
+    OnetimeProductMutationResult as _OnetimeProductMutationResult,
+)
+from play_store_mcp.server import (  # noqa: E402
+    activate_onetime_product,
+    batch_create_onetime_products,
+    create_onetime_product,
+    deactivate_onetime_product,
+    delete_onetime_product,
+    get_onetime_product,
+    list_onetime_products,
+    update_onetime_product,
+)
+
+
+class TestListOnetimeProductsTool:
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.list_onetime_products.return_value = [
+            _OnetimeProduct(package_name="com.example.app", product_id="premium")
+        ]
+        result = list_onetime_products(package_name="com.example.app")
+        assert result["success"] is True
+        assert len(result["products"]) == 1
+
+
+class TestGetOnetimeProductTool:
+    def test_empty_product_id(self, mock_client: MagicMock) -> None:
+        result = get_onetime_product(package_name="com.example.app", product_id="")
+        assert result["success"] is False
+        mock_client.get_onetime_product.assert_not_called()
+
+
+class TestCreateUpdateOnetimeProduct:
+    def test_create_validates_listings(self, mock_client: MagicMock) -> None:
+        result = create_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+            listings=[],
+            price_micros=9_990_000,
+        )
+        assert result["success"] is False
+        mock_client.upsert_onetime_product.assert_not_called()
+
+    def test_create_calls_client_with_create_label(self, mock_client: MagicMock) -> None:
+        mock_client.upsert_onetime_product.return_value = _OnetimeProductMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            operation="create",
+            message="ok",
+        )
+        listings = [{"language_code": "en-US", "title": "T", "description": "D"}]
+        result = create_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+            listings=listings,
+            price_micros=9_990_000,
+        )
+        assert result["success"] is True
+        # operation_label is the last positional/kwarg
+        assert (
+            mock_client.upsert_onetime_product.call_args.kwargs.get("operation_label") == "create"
+        )
+
+    def test_update_calls_client_with_update_label(self, mock_client: MagicMock) -> None:
+        mock_client.upsert_onetime_product.return_value = _OnetimeProductMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            operation="update",
+            message="ok",
+        )
+        listings = [{"language_code": "en-US", "title": "T", "description": "D"}]
+        result = update_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+            listings=listings,
+            price_micros=9_990_000,
+        )
+        assert result["success"] is True
+        assert (
+            mock_client.upsert_onetime_product.call_args.kwargs.get("operation_label") == "update"
+        )
+
+
+class TestDeleteOnetimeProductTool:
+    def test_empty(self, mock_client: MagicMock) -> None:
+        result = delete_onetime_product(package_name="com.example.app", product_id="")
+        assert result["success"] is False
+        mock_client.delete_onetime_product.assert_not_called()
+
+
+class TestActivateDeactivateTool:
+    def test_activate(self, mock_client: MagicMock) -> None:
+        mock_client.activate_onetime_product.return_value = _OnetimeProductMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            operation="activate",
+            message="ok",
+        )
+        result = activate_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+        )
+        assert result["success"] is True
+        mock_client.activate_onetime_product.assert_called_once_with(
+            "com.example.app", "premium", "default"
+        )
+
+    def test_deactivate(self, mock_client: MagicMock) -> None:
+        mock_client.deactivate_onetime_product.return_value = _OnetimeProductMutationResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="premium",
+            operation="deactivate",
+            message="ok",
+        )
+        result = deactivate_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+        )
+        assert result["success"] is True
+
+
+class TestBatchCreateOnetimeProductsTool:
+    def test_empty_list_rejected(self, mock_client: MagicMock) -> None:
+        result = batch_create_onetime_products(package_name="com.example.app", products=[])
+        assert result["success"] is False
+        mock_client.batch_create_onetime_products.assert_not_called()
+
+    def test_aggregates_results(self, mock_client: MagicMock) -> None:
+        mock_client.batch_create_onetime_products.return_value = [
+            _OnetimeProductMutationResult(
+                success=True,
+                package_name="com.example.app",
+                product_id="a",
+                operation="batch_create",
+                message="ok",
+            ),
+            _OnetimeProductMutationResult(
+                success=False,
+                package_name="com.example.app",
+                product_id="b",
+                operation="batch_create",
+                message="failed",
+                error="x",
+            ),
+        ]
+        result = batch_create_onetime_products(
+            package_name="com.example.app",
+            products=[
+                {"product_id": "a", "listings": [], "price_micros": 1},
+                {"product_id": "b", "listings": [], "price_micros": 1},
+            ],
+        )
+        assert result["success"] is False
+        assert result["successful_count"] == 1
+        assert result["failed_count"] == 1

@@ -75,6 +75,19 @@ Complete reference for all MCP tools provided by the Play Store MCP server.
 | [`list_in_app_products`](tools/subscriptions.md#list_in_app_products) | List all in-app products |
 | [`get_in_app_product`](tools/subscriptions.md#get_in_app_product) | Get details of a specific product |
 
+## One-Time Products (Modern Monetization API)
+
+| Tool | Description |
+|---|---|
+| [`list_onetime_products`](tools/onetime-products.md#list_onetime_products) | List one-time products via the modern API |
+| [`get_onetime_product`](tools/onetime-products.md#get_onetime_product) | Get a single one-time product |
+| [`create_onetime_product`](tools/onetime-products.md#create_onetime_product) | Create (UPSERT) a one-time product with USD price auto-converted to ~150 regions |
+| [`update_onetime_product`](tools/onetime-products.md#update_onetime_product) | Update an existing one-time product (same endpoint) |
+| [`delete_onetime_product`](tools/onetime-products.md#delete_onetime_product) | Delete a one-time product |
+| [`activate_onetime_product`](tools/onetime-products.md#activate_onetime_product) | Activate a purchase option |
+| [`deactivate_onetime_product`](tools/onetime-products.md#deactivate_onetime_product) | Deactivate a purchase option |
+| [`batch_create_onetime_products`](tools/onetime-products.md#batch_create_onetime_products) | Create or update many at once |
+
 ## Testers Tools
 
 | Tool | Description |

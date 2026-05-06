@@ -2102,3 +2102,377 @@ class TestValidateEdit:
         assert result.success is True
         assert result.valid is False
         assert "Edit not valid" in result.message
+
+
+# =========================================================================
+# Group #2 — monetization.onetimeproducts
+# =========================================================================
+
+
+class TestValidatePurchaseOptionId:
+    @pytest.mark.parametrize("v", ["default", "buy", "premium-once", "abc123"])
+    def test_valid(self, v: str) -> None:
+        PlayStoreClient._validate_purchase_option_id(v)
+
+    @pytest.mark.parametrize(
+        "v",
+        ["", "Has-Upper", "with_underscore", "starts-with-hyphen-bad" * 4, "no.dots"],
+    )
+    def test_invalid(self, v: str) -> None:
+        with pytest.raises(ValueError):
+            PlayStoreClient._validate_purchase_option_id(v)
+
+
+class TestPatchWithRegionsVersion:
+    def test_appends_when_no_query(self) -> None:
+        request = MagicMock()
+        request.uri = "https://example.com/path"
+        PlayStoreClient._patch_with_regions_version(request, "2024/02")
+        assert request.uri == "https://example.com/path?regionsVersion.version=2024/02"
+
+    def test_appends_with_existing_query(self) -> None:
+        request = MagicMock()
+        request.uri = "https://example.com/path?foo=bar"
+        PlayStoreClient._patch_with_regions_version(request, "v1")
+        assert request.uri == "https://example.com/path?foo=bar&regionsVersion.version=v1"
+
+
+class TestListGetOnetimeProducts:
+    def test_list_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.onetimeproducts.return_value.list.return_value.execute.return_value = {
+            "oneTimeProducts": [
+                {
+                    "productId": "premium",
+                    "listings": [
+                        {
+                            "languageCode": "en-US",
+                            "title": "Premium",
+                            "description": "Unlock premium",
+                        }
+                    ],
+                    "purchaseOptions": [
+                        {
+                            "purchaseOptionId": "default",
+                            "state": "ACTIVE",
+                            "buyOption": {"legacyCompatible": True},
+                            "regionalPricingAndAvailabilityConfigs": [
+                                {
+                                    "regionCode": "US",
+                                    "price": {
+                                        "currencyCode": "USD",
+                                        "units": "9",
+                                        "nanos": 990000000,
+                                    },
+                                    "availability": "AVAILABLE",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        result = client.list_onetime_products("com.example.app")
+        assert len(result) == 1
+        assert result[0].product_id == "premium"
+        assert len(result[0].listings) == 1
+        assert result[0].listings[0].language_code == "en-US"
+        assert len(result[0].purchase_options) == 1
+        assert result[0].purchase_options[0].state == "ACTIVE"
+        assert result[0].purchase_options[0].legacy_compatible is True
+        assert len(result[0].purchase_options[0].regional_prices) == 1
+        rp = result[0].purchase_options[0].regional_prices[0]
+        assert rp.region_code == "US"
+        assert rp.units == "9"
+        assert rp.nanos == 990000000
+
+    def test_get_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.onetimeproducts.return_value.get.return_value.execute.return_value = {
+            "productId": "premium",
+            "listings": [],
+            "purchaseOptions": [],
+        }
+        product = client.get_onetime_product("com.example.app", "premium")
+        assert product.product_id == "premium"
+        _mock_service.monetization.return_value.onetimeproducts.return_value.get.assert_called_once_with(
+            packageName="com.example.app", productId="premium"
+        )
+
+    def test_list_http_error(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.onetimeproducts.return_value.list.return_value.execute.side_effect = _make_http_error(
+            403, "forbidden"
+        )
+        with pytest.raises(PlayStoreClientError):
+            client.list_onetime_products("com.example.app")
+
+
+class TestUpsertOnetimeProduct:
+    def test_validation_empty_listings(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.upsert_onetime_product(
+            "com.example.app",
+            "premium",
+            listings=[],
+            price_micros=9_990_000,
+        )
+        assert result.success is False
+        assert "listings" in result.message
+        _mock_service.monetization.return_value.convertRegionPrices.assert_not_called()
+
+    def test_validation_zero_price(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.upsert_onetime_product(
+            "com.example.app",
+            "premium",
+            listings=[
+                {
+                    "language_code": "en-US",
+                    "title": "T",
+                    "description": "D",
+                }
+            ],
+            price_micros=0,
+        )
+        assert result.success is False
+        assert "price_micros" in result.message
+
+    def test_validation_bad_purchase_option_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.upsert_onetime_product(
+            "com.example.app",
+            "premium",
+            listings=[
+                {
+                    "language_code": "en-US",
+                    "title": "T",
+                    "description": "D",
+                }
+            ],
+            price_micros=9_990_000,
+            purchase_option_id="UPPER",
+        )
+        assert result.success is False
+        _mock_service.monetization.return_value.convertRegionPrices.assert_not_called()
+
+    def test_happy_calls_convert_then_patch_with_regions_version(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        # Mock convertRegionPrices
+        _mock_service.monetization.return_value.convertRegionPrices.return_value.execute.return_value = {
+            "convertedRegionPrices": {
+                "US": {
+                    "regionCode": "US",
+                    "price": {
+                        "currencyCode": "USD",
+                        "units": "9",
+                        "nanos": 990000000,
+                    },
+                },
+                "GB": {
+                    "regionCode": "GB",
+                    "price": {
+                        "currencyCode": "GBP",
+                        "units": "8",
+                        "nanos": 0,
+                    },
+                },
+            },
+            "regionVersion": {"version": "2024/02"},
+        }
+        # Mock patch
+        patch_request = MagicMock()
+        patch_request.uri = "https://example.com/v3/applications/com.example.app/onetimeproducts/premium?allowMissing=True&updateMask=listings,purchaseOptions"
+        patch_request.execute.return_value = {
+            "productId": "premium",
+            "listings": [
+                {"languageCode": "en-US", "title": "Premium", "description": "d"},
+            ],
+            "purchaseOptions": [
+                {
+                    "purchaseOptionId": "default",
+                    "state": "DRAFT",
+                    "buyOption": {"legacyCompatible": True},
+                    "regionalPricingAndAvailabilityConfigs": [],
+                }
+            ],
+        }
+        _mock_service.monetization.return_value.onetimeproducts.return_value.patch.return_value = (
+            patch_request
+        )
+
+        result = client.upsert_onetime_product(
+            "com.example.app",
+            "premium",
+            listings=[
+                {
+                    "language_code": "en-US",
+                    "title": "Premium",
+                    "description": "Unlock",
+                }
+            ],
+            price_micros=9_990_000,
+            purchase_option_id="default",
+            legacy_compatible=True,
+        )
+
+        assert result.success is True
+        assert result.product is not None
+        assert result.product.product_id == "premium"
+        # convertRegionPrices called with USD price
+        convert_call = _mock_service.monetization.return_value.convertRegionPrices.call_args
+        assert convert_call.kwargs["packageName"] == "com.example.app"
+        assert convert_call.kwargs["body"] == {
+            "price": {
+                "currencyCode": "USD",
+                "units": "9",
+                "nanos": 990_000_000,
+            }
+        }
+        # regionsVersion.version appended to URL
+        assert "regionsVersion.version=2024/02" in patch_request.uri
+        # patch called with allowMissing=True and updateMask
+        patch_call = (
+            _mock_service.monetization.return_value.onetimeproducts.return_value.patch.call_args
+        )
+        assert patch_call.kwargs["allowMissing"] is True
+        assert patch_call.kwargs["updateMask"] == "listings,purchaseOptions"
+        # body has converted regional configs
+        body = patch_call.kwargs["body"]
+        assert {
+            c["regionCode"]
+            for c in body["purchaseOptions"][0]["regionalPricingAndAvailabilityConfigs"]
+        } == {"US", "GB"}
+
+    def test_convert_failure_short_circuits(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.convertRegionPrices.return_value.execute.side_effect = _make_http_error(
+            500, "server error"
+        )
+        # Patch not setup since we should not get there
+
+        result = client.upsert_onetime_product(
+            "com.example.app",
+            "premium",
+            listings=[
+                {
+                    "language_code": "en-US",
+                    "title": "Premium",
+                    "description": "Unlock",
+                }
+            ],
+            price_micros=9_990_000,
+        )
+        assert result.success is False
+        assert "regional prices" in result.message
+        _mock_service.monetization.return_value.onetimeproducts.return_value.patch.assert_not_called()
+
+
+class TestDeleteOnetimeProduct:
+    def test_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.onetimeproducts.return_value.delete.return_value.execute.return_value = None
+        result = client.delete_onetime_product("com.example.app", "premium")
+        assert result.success is True
+        _mock_service.monetization.return_value.onetimeproducts.return_value.delete.assert_called_once_with(
+            packageName="com.example.app", productId="premium"
+        )
+
+    def test_failure(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.monetization.return_value.onetimeproducts.return_value.delete.return_value.execute.side_effect = _make_http_error(
+            409, "conflict"
+        )
+        result = client.delete_onetime_product("com.example.app", "premium")
+        assert result.success is False
+        assert "Delete failed" in result.message
+
+
+class TestActivateDeactivateOnetimeProduct:
+    def test_activate_invalid_purchase_option_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.activate_onetime_product(
+            "com.example.app", "premium", purchase_option_id="BAD"
+        )
+        assert result.success is False
+        _mock_service.monetization.return_value.onetimeproducts.return_value.purchaseOptions.assert_not_called()
+
+    def test_activate_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        po = _mock_service.monetization.return_value.onetimeproducts.return_value.purchaseOptions.return_value
+        po.batchUpdateStates.return_value.execute.return_value = None
+
+        result = client.activate_onetime_product(
+            "com.example.app", "premium", purchase_option_id="default"
+        )
+        assert result.success is True
+        po.batchUpdateStates.assert_called_once()
+        body = po.batchUpdateStates.call_args.kwargs["body"]
+        assert "activatePurchaseOptionRequest" in body["requests"][0]
+        assert body["requests"][0]["activatePurchaseOptionRequest"]["purchaseOptionId"] == "default"
+
+    def test_deactivate_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        po = _mock_service.monetization.return_value.onetimeproducts.return_value.purchaseOptions.return_value
+        po.batchUpdateStates.return_value.execute.return_value = None
+
+        result = client.deactivate_onetime_product("com.example.app", "premium")
+        assert result.success is True
+        body = po.batchUpdateStates.call_args.kwargs["body"]
+        assert "deactivatePurchaseOptionRequest" in body["requests"][0]
+
+
+class TestBatchCreateOnetimeProducts:
+    def test_skips_entry_without_product_id(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        results = client.batch_create_onetime_products(
+            "com.example.app",
+            [
+                {"listings": [], "price_micros": 100},  # no product_id
+            ],
+        )
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "product_id" in results[0].message

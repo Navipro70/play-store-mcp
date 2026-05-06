@@ -1449,6 +1449,267 @@ def validate_edit(
 
 
 # =============================================================================
+# Group #2: monetization.onetimeproducts (modern IAP API)
+# =============================================================================
+
+
+@mcp.tool()
+def list_onetime_products(package_name: str) -> dict[str, Any]:
+    """List one-time IAP products via the modern monetization API.
+
+    `monetization.onetimeproducts` is the recommended replacement for the
+    legacy `inappproducts` resource.
+
+    Args:
+        package_name: App package name.
+
+    Returns:
+        Dict with `success`, `products` (list of OnetimeProduct dicts).
+    """
+    client = get_client_from_context()
+    try:
+        products = client.list_onetime_products(package_name)
+        return {
+            "success": True,
+            "package_name": package_name,
+            "products": [p.model_dump() for p in products],
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def get_onetime_product(
+    package_name: str,
+    product_id: str,
+) -> dict[str, Any]:
+    """Get a single one-time product.
+
+    Args:
+        package_name: App package name.
+        product_id: Product ID.
+
+    Returns:
+        Dict with `success` and the OnetimeProduct fields.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+
+    client = get_client_from_context()
+    try:
+        product = client.get_onetime_product(package_name, product_id)
+        return {"success": True, **product.model_dump()}
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def create_onetime_product(
+    package_name: str,
+    product_id: str,
+    listings: list[dict[str, str]],
+    price_micros: int,
+    purchase_option_id: str = "default",
+    legacy_compatible: bool = True,
+) -> dict[str, Any]:
+    """Create a new one-time product (UPSERT — also works as update).
+
+    Internally PATCH'es with `allowMissing=True` so the same call creates a
+    new product or updates an existing one. Use `update_onetime_product` if
+    you want to make the intent explicit in your script — it routes through
+    the same endpoint.
+
+    Pricing: pass a single USD price in micros (e.g. `9_990_000` for
+    `$9.99`); the tool calls `convertRegionPrices` to compute regional
+    prices for ~150 regions automatically and attaches the result.
+
+    Args:
+        package_name: App package name.
+        product_id: Product ID. Use lowercase letters, numbers, dot,
+            underscore.
+        listings: List of {language_code, title, description}. At least one
+            entry required. Title ≤ 55 chars, description ≤ 200 chars.
+        price_micros: USD price in micros (1 USD = 1_000_000). Must be > 0.
+        purchase_option_id: Identifier for the buy option. Default
+            "default". Pattern: starts with [a-z0-9], only [a-z0-9-],
+            ≤ 63 chars.
+        legacy_compatible: If True, this product is visible to legacy
+            BillingClient flows that don't understand the new model.
+            Default True.
+
+    Returns:
+        Dict with `success`, `product` (full record), `message`, `error`.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+    if not isinstance(listings, list) or not listings:
+        return {"success": False, "error": "listings must be a non-empty list"}
+
+    client = get_client_from_context()
+    result = client.upsert_onetime_product(
+        package_name,
+        product_id,
+        listings,
+        price_micros,
+        purchase_option_id,
+        legacy_compatible,
+        operation_label="create",
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_onetime_product(
+    package_name: str,
+    product_id: str,
+    listings: list[dict[str, str]],
+    price_micros: int,
+    purchase_option_id: str = "default",
+    legacy_compatible: bool = True,
+) -> dict[str, Any]:
+    """Update an existing one-time product (UPSERT semantics).
+
+    Same endpoint as `create_onetime_product`. Use this name when the intent
+    is "update an existing product" — both work via PATCH+allowMissing.
+
+    Args/Returns: see `create_onetime_product`.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+    if not isinstance(listings, list) or not listings:
+        return {"success": False, "error": "listings must be a non-empty list"}
+
+    client = get_client_from_context()
+    result = client.upsert_onetime_product(
+        package_name,
+        product_id,
+        listings,
+        price_micros,
+        purchase_option_id,
+        legacy_compatible,
+        operation_label="update",
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_onetime_product(
+    package_name: str,
+    product_id: str,
+) -> dict[str, Any]:
+    """Delete a one-time product.
+
+    The product must not have any active orders/entitlements depending on
+    it; the API will reject the call otherwise.
+
+    Args:
+        package_name: App package name.
+        product_id: Product ID to delete.
+
+    Returns:
+        Dict with `success`, `message`, `error`.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+
+    client = get_client_from_context()
+    result = client.delete_onetime_product(package_name, product_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def activate_onetime_product(
+    package_name: str,
+    product_id: str,
+    purchase_option_id: str = "default",
+) -> dict[str, Any]:
+    """Activate a purchase option on a one-time product.
+
+    Toggles the option's `state` from DRAFT/INACTIVE → ACTIVE so it becomes
+    purchasable in the BillingClient.
+
+    Args:
+        package_name: App package name.
+        product_id: Product ID.
+        purchase_option_id: Purchase option to activate. Default "default".
+
+    Returns:
+        Dict with `success`, `message`, `error`.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+
+    client = get_client_from_context()
+    result = client.activate_onetime_product(package_name, product_id, purchase_option_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def deactivate_onetime_product(
+    package_name: str,
+    product_id: str,
+    purchase_option_id: str = "default",
+) -> dict[str, Any]:
+    """Deactivate a purchase option on a one-time product.
+
+    Sets the option's state to INACTIVE so users can no longer buy it,
+    without deleting the product.
+
+    Args:
+        package_name: App package name.
+        product_id: Product ID.
+        purchase_option_id: Purchase option to deactivate. Default "default".
+
+    Returns:
+        Dict with `success`, `message`, `error`.
+    """
+    if not product_id:
+        return {"success": False, "error": "product_id cannot be empty"}
+
+    client = get_client_from_context()
+    result = client.deactivate_onetime_product(package_name, product_id, purchase_option_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def batch_create_onetime_products(
+    package_name: str,
+    products: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create or update many one-time products.
+
+    Each entry should be: {`product_id`, `listings` (list), `price_micros`,
+    optional `purchase_option_id`, optional `legacy_compatible`}.
+
+    Each product is upserted via its own PATCH call (one
+    `convertRegionPrices` per product). On per-item failure, other items
+    still proceed.
+
+    Args:
+        package_name: App package name.
+        products: List of product dicts as described above.
+
+    Returns:
+        Dict with `success` (True iff all succeeded), `successful_count`,
+        `failed_count`, and `results` (per-item dicts).
+    """
+    if not isinstance(products, list) or not products:
+        return {"success": False, "error": "products must be a non-empty list"}
+
+    client = get_client_from_context()
+    item_results = client.batch_create_onetime_products(package_name, products)
+    successful = sum(1 for r in item_results if r.success)
+    failed = len(item_results) - successful
+    return {
+        "success": failed == 0,
+        "package_name": package_name,
+        "successful_count": successful,
+        "failed_count": failed,
+        "results": [r.model_dump() for r in item_results],
+    }
+
+
+# =============================================================================
 # HTTP Endpoints for Streamable Transport
 # =============================================================================
 

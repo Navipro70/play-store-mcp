@@ -34,10 +34,15 @@ from play_store_mcp.models import (
     InAppProduct,
     Listing,
     ListingUpdateResult,
+    OnetimeProduct,
+    OnetimeProductMutationResult,
     Order,
+    ProductLocalization,
     ProductPurchase,
     PurchaseAckResult,
+    PurchaseOption,
     RefundResult,
+    RegionalPrice,
     Release,
     Review,
     ReviewReplyResult,
@@ -2725,3 +2730,429 @@ class PlayStoreClient:
                 message=f"Edit not valid: {e.reason}",
                 error=str(e),
             )
+
+    # =========================================================================
+    # Group #2: monetization.onetimeproducts (modern IAP API)
+    # =========================================================================
+
+    @staticmethod
+    def _onetime_product_from_api(
+        package_name: str,
+        product_id: str,
+        data: dict[str, Any],
+    ) -> OnetimeProduct:
+        listings_raw = data.get("listings", []) or []
+        listings: list[ProductLocalization] = []
+        for ln in listings_raw:
+            if not isinstance(ln, dict):
+                continue
+            listings.append(
+                ProductLocalization(
+                    language_code=ln.get("languageCode", ""),
+                    title=ln.get("title", ""),
+                    description=ln.get("description", ""),
+                )
+            )
+
+        purchase_options: list[PurchaseOption] = []
+        for po in data.get("purchaseOptions", []) or []:
+            if not isinstance(po, dict):
+                continue
+            buy_option = po.get("buyOption") or {}
+            regional: list[RegionalPrice] = []
+            for rc in po.get("regionalPricingAndAvailabilityConfigs", []) or []:
+                if not isinstance(rc, dict):
+                    continue
+                price = rc.get("price") or {}
+                regional.append(
+                    RegionalPrice(
+                        region_code=rc.get("regionCode", ""),
+                        currency_code=price.get("currencyCode", ""),
+                        units=str(price.get("units", "0")),
+                        nanos=int(price.get("nanos", 0) or 0),
+                    )
+                )
+            purchase_options.append(
+                PurchaseOption(
+                    purchase_option_id=po.get("purchaseOptionId", ""),
+                    state=po.get("state", "DRAFT"),
+                    regional_prices=regional,
+                    legacy_compatible=bool(buy_option.get("legacyCompatible", False)),
+                )
+            )
+
+        return OnetimeProduct(
+            package_name=package_name,
+            product_id=data.get("productId") or product_id,
+            listings=listings,
+            purchase_options=purchase_options,
+            tax_and_compliance_settings=data.get("taxAndComplianceSettings"),
+        )
+
+    @staticmethod
+    def _validate_purchase_option_id(option_id: str) -> None:
+        if not option_id:
+            raise ValueError("purchase_option_id cannot be empty")
+        if not re.match(r"^[a-z0-9][a-z0-9\-]{0,62}$", option_id):
+            raise ValueError(
+                "purchase_option_id must start with [a-z0-9], contain only "
+                f"[a-z0-9-], and be ≤63 chars; got: {option_id}"
+            )
+
+    def list_onetime_products(
+        self,
+        package_name: str,
+    ) -> list[OnetimeProduct]:
+        """List one-time products via `monetization.onetimeproducts.list`."""
+        self._logger.info("Listing one-time products", package_name=package_name)
+        service = self._get_service()
+        try:
+            response = (
+                service.monetization().onetimeproducts().list(packageName=package_name).execute()
+            )
+            return [
+                self._onetime_product_from_api(package_name, item.get("productId", ""), item)
+                for item in (response.get("oneTimeProducts", []) or [])
+                if isinstance(item, dict)
+            ]
+        except HttpError as e:
+            self._logger.exception("Failed to list one-time products", error=str(e))
+            raise PlayStoreClientError(f"Failed to list one-time products: {e.reason}") from e
+
+    def get_onetime_product(
+        self,
+        package_name: str,
+        product_id: str,
+    ) -> OnetimeProduct:
+        """Get a single one-time product."""
+        self._logger.info(
+            "Getting one-time product",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+        try:
+            data = (
+                service.monetization()
+                .onetimeproducts()
+                .get(packageName=package_name, productId=product_id)
+                .execute()
+            )
+            return self._onetime_product_from_api(package_name, product_id, data)
+        except HttpError as e:
+            self._logger.exception("Failed to get one-time product", error=str(e))
+            raise PlayStoreClientError(f"Failed to get one-time product: {e.reason}") from e
+
+    def upsert_onetime_product(
+        self,
+        package_name: str,
+        product_id: str,
+        listings: list[dict[str, str]],
+        price_micros: int,
+        purchase_option_id: str = "default",
+        legacy_compatible: bool = True,
+        operation_label: str = "create_or_update",
+    ) -> OnetimeProductMutationResult:
+        """Create or update a one-time product (UPSERT via `allowMissing=True`).
+
+        Builds regional prices from a single USD price by calling
+        ``convertRegionPrices`` and bundles everything into one PATCH call.
+        """
+        # Validation
+        if not listings:
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=operation_label,
+                message="listings cannot be empty",
+                error="ValueError",
+            )
+        for entry in listings:
+            for required in ("language_code", "title", "description"):
+                if not entry.get(required):
+                    return OnetimeProductMutationResult(
+                        success=False,
+                        package_name=package_name,
+                        product_id=product_id,
+                        operation=operation_label,
+                        message=f"listing entry missing required field: {required}",
+                        error="ValueError",
+                    )
+        if price_micros <= 0:
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=operation_label,
+                message="price_micros must be a positive integer",
+                error="ValueError",
+            )
+        try:
+            self._validate_purchase_option_id(purchase_option_id)
+        except ValueError as e:
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=operation_label,
+                message=str(e),
+                error="ValueError",
+            )
+
+        self._logger.info(
+            "Upserting one-time product",
+            package_name=package_name,
+            product_id=product_id,
+            purchase_option_id=purchase_option_id,
+            price_micros=price_micros,
+            operation=operation_label,
+        )
+
+        # Build regional pricing from USD via convertRegionPrices
+        try:
+            convert_response = self._convert_region_prices(
+                package_name=package_name,
+                currency_code="USD",
+                units=str(price_micros // 1_000_000),
+                nanos=int((price_micros % 1_000_000) * 1000),
+            )
+        except HttpError as e:
+            self._logger.exception("convertRegionPrices failed", error=str(e))
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=operation_label,
+                message=f"Failed to compute regional prices: {e.reason}",
+                error=str(e),
+            )
+
+        regions_version = (convert_response.get("regionVersion", {}) or {}).get("version", "")
+        regional_configs: list[dict[str, Any]] = []
+        converted = convert_response.get("convertedRegionPrices", {}) or {}
+        for region_code, entry in converted.items():
+            price_obj = (entry or {}).get("price") or {}
+            regional_configs.append(
+                {
+                    "regionCode": region_code,
+                    "price": {
+                        "currencyCode": price_obj.get("currencyCode", ""),
+                        "units": str(price_obj.get("units", "0")),
+                        "nanos": int(price_obj.get("nanos", 0) or 0),
+                    },
+                    "availability": "AVAILABLE",
+                }
+            )
+
+        body = {
+            "packageName": package_name,
+            "productId": product_id,
+            "listings": [
+                {
+                    "languageCode": ln["language_code"],
+                    "title": ln["title"],
+                    "description": ln["description"],
+                }
+                for ln in listings
+            ],
+            "purchaseOptions": [
+                {
+                    "purchaseOptionId": purchase_option_id,
+                    "buyOption": {"legacyCompatible": legacy_compatible},
+                    "regionalPricingAndAvailabilityConfigs": regional_configs,
+                }
+            ],
+        }
+
+        service = self._get_service()
+        request = (
+            service.monetization()
+            .onetimeproducts()
+            .patch(
+                packageName=package_name,
+                productId=product_id,
+                body=body,
+                allowMissing=True,
+                updateMask="listings,purchaseOptions",
+            )
+        )
+        if regions_version:
+            self._patch_with_regions_version(request, regions_version)
+
+        try:
+            response = request.execute()
+            product = self._onetime_product_from_api(package_name, product_id, response or {})
+            return OnetimeProductMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation=operation_label,
+                product=product,
+                message=f"Upserted one-time product {product_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("onetimeproducts.patch failed", error=str(e))
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=operation_label,
+                message=f"Upsert failed: {e.reason}",
+                error=str(e),
+            )
+
+    def delete_onetime_product(
+        self,
+        package_name: str,
+        product_id: str,
+    ) -> OnetimeProductMutationResult:
+        """Delete a one-time product."""
+        self._logger.info(
+            "Deleting one-time product",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+        try:
+            service.monetization().onetimeproducts().delete(
+                packageName=package_name, productId=product_id
+            ).execute()
+            return OnetimeProductMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation="delete",
+                message=f"Deleted one-time product {product_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to delete one-time product", error=str(e))
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="delete",
+                message=f"Delete failed: {e.reason}",
+                error=str(e),
+            )
+
+    def _onetime_purchase_option_state(
+        self,
+        package_name: str,
+        product_id: str,
+        purchase_option_id: str,
+        activate: bool,
+    ) -> OnetimeProductMutationResult:
+        op = "activate" if activate else "deactivate"
+        try:
+            self._validate_purchase_option_id(purchase_option_id)
+        except ValueError as e:
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=op,
+                message=str(e),
+                error="ValueError",
+            )
+        self._logger.info(
+            f"{op}d-purchase-option",
+            package_name=package_name,
+            product_id=product_id,
+            purchase_option_id=purchase_option_id,
+        )
+        sub_request = {
+            "packageName": package_name,
+            "productId": product_id,
+            "purchaseOptionId": purchase_option_id,
+        }
+        body = {
+            "requests": [
+                {
+                    f"{op}PurchaseOptionRequest": sub_request,
+                }
+            ]
+        }
+        service = self._get_service()
+        try:
+            service.monetization().onetimeproducts().purchaseOptions().batchUpdateStates(
+                packageName=package_name,
+                productId=product_id,
+                body=body,
+            ).execute()
+            return OnetimeProductMutationResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation=op,
+                message=(f"{op.capitalize()}d purchase option {purchase_option_id}"),
+            )
+        except HttpError as e:
+            self._logger.exception(f"Failed to {op} purchase option", error=str(e))
+            return OnetimeProductMutationResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation=op,
+                message=f"{op.capitalize()} failed: {e.reason}",
+                error=str(e),
+            )
+
+    def activate_onetime_product(
+        self,
+        package_name: str,
+        product_id: str,
+        purchase_option_id: str = "default",
+    ) -> OnetimeProductMutationResult:
+        return self._onetime_purchase_option_state(
+            package_name, product_id, purchase_option_id, activate=True
+        )
+
+    def deactivate_onetime_product(
+        self,
+        package_name: str,
+        product_id: str,
+        purchase_option_id: str = "default",
+    ) -> OnetimeProductMutationResult:
+        return self._onetime_purchase_option_state(
+            package_name, product_id, purchase_option_id, activate=False
+        )
+
+    def batch_create_onetime_products(
+        self,
+        package_name: str,
+        products: list[dict[str, Any]],
+    ) -> list[OnetimeProductMutationResult]:
+        """Create or update many one-time products.
+
+        Loops over `upsert_onetime_product` for each entry. Each entry must
+        be a dict with at least: ``product_id``, ``listings``, ``price_micros``.
+        Optional: ``purchase_option_id``, ``legacy_compatible``.
+        """
+        results: list[OnetimeProductMutationResult] = []
+        for entry in products:
+            product_id = entry.get("product_id")
+            if not product_id:
+                results.append(
+                    OnetimeProductMutationResult(
+                        success=False,
+                        package_name=package_name,
+                        product_id=str(product_id or ""),
+                        operation="batch_create",
+                        message="entry missing product_id",
+                        error="ValueError",
+                    )
+                )
+                continue
+            results.append(
+                self.upsert_onetime_product(
+                    package_name=package_name,
+                    product_id=product_id,
+                    listings=entry.get("listings", []),
+                    price_micros=int(entry.get("price_micros", 0)),
+                    purchase_option_id=entry.get("purchase_option_id", "default"),
+                    legacy_compatible=entry.get("legacy_compatible", True),
+                    operation_label="batch_create",
+                )
+            )
+        return results
