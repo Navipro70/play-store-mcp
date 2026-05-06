@@ -774,3 +774,218 @@ class TestServerMain:
             token="tok",
         )
         assert result["subscription_id"] == "sub1"
+
+
+# =========================================================================
+# Group #1 — edits.images server tools
+# =========================================================================
+
+
+from play_store_mcp.models import (  # noqa: E402
+    BatchImageUploadResult,
+    StoreImage,
+    StoreImageDeleteResult,
+    StoreImageUploadResult,
+)
+from play_store_mcp.server import (  # noqa: E402
+    batch_upload_store_images,
+    delete_all_store_images,
+    delete_store_image,
+    list_store_images,
+    upload_store_image,
+    validate_image_type,
+)
+
+
+class TestValidateImageType:
+    def test_valid(self) -> None:
+        result = validate_image_type("icon")
+        assert result["valid"] is True
+        assert result["errors"] == []
+        assert "phoneScreenshots" in result["allowed"]
+
+    def test_invalid(self) -> None:
+        result = validate_image_type("PHONE_SCREENSHOTS")
+        assert result["valid"] is False
+        assert len(result["errors"]) == 1
+
+
+class TestListStoreImagesTool:
+    def test_invalid_image_type(self, mock_client: MagicMock) -> None:
+        result = list_store_images(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="bogus",
+        )
+        assert result["success"] is False
+        assert "image_type" in result["error"]
+        mock_client.list_store_images.assert_not_called()
+
+    def test_invalid_language(self, mock_client: MagicMock) -> None:
+        result = list_store_images(
+            package_name="com.example.app",
+            language="badlang",
+            image_type="icon",
+        )
+        assert result["success"] is False
+        assert "language" in result["error"]
+        mock_client.list_store_images.assert_not_called()
+
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.list_store_images.return_value = [
+            StoreImage(id="i1", url="u1"),
+            StoreImage(id="i2", url="u2", sha1="aa", sha256="bb"),
+        ]
+
+        result = list_store_images(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+        )
+
+        assert result["success"] is True
+        assert len(result["images"]) == 2
+        mock_client.list_store_images.assert_called_once_with("com.example.app", "en-US", "icon")
+
+    def test_wraps_client_error(self, mock_client: MagicMock) -> None:
+        mock_client.list_store_images.side_effect = PlayStoreClientError("Boom")
+        result = list_store_images(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+        )
+        assert result["success"] is False
+        assert "Boom" in result["error"]
+
+
+class TestUploadStoreImageTool:
+    def test_invalid_image_type(self, mock_client: MagicMock, tmp_path: Any) -> None:
+        result = upload_store_image(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="bogus",
+            file_path=str(tmp_path / "x.png"),
+        )
+        assert result["success"] is False
+        mock_client.upload_store_image.assert_not_called()
+
+    def test_calls_client(self, mock_client: MagicMock, tmp_path: Any) -> None:
+        png = tmp_path / "icon.png"
+        png.write_bytes(b"\x89PNG")
+        mock_client.upload_store_image.return_value = StoreImageUploadResult(
+            success=True,
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+            image=StoreImage(id="img-1", url="u"),
+            message="Uploaded",
+        )
+
+        result = upload_store_image(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+            file_path=str(png),
+        )
+
+        assert result["success"] is True
+        assert result["image"]["id"] == "img-1"
+        mock_client.upload_store_image.assert_called_once_with(
+            "com.example.app", "en-US", "icon", str(png)
+        )
+
+
+class TestDeleteStoreImageTool:
+    def test_empty_image_id_rejected(self, mock_client: MagicMock) -> None:
+        result = delete_store_image(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+            image_id="",
+        )
+        assert result["success"] is False
+        mock_client.delete_store_image.assert_not_called()
+
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.delete_store_image.return_value = StoreImageDeleteResult(
+            success=True,
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+            image_id="img-x",
+            deleted_count=1,
+            message="Deleted",
+        )
+
+        result = delete_store_image(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="icon",
+            image_id="img-x",
+        )
+
+        assert result["success"] is True
+        mock_client.delete_store_image.assert_called_once_with(
+            "com.example.app", "en-US", "icon", "img-x"
+        )
+
+
+class TestDeleteAllStoreImagesTool:
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.delete_all_store_images.return_value = StoreImageDeleteResult(
+            success=True,
+            package_name="com.example.app",
+            language="en-US",
+            image_type="phoneScreenshots",
+            deleted_count=4,
+            message="Deleted 4",
+        )
+        result = delete_all_store_images(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="phoneScreenshots",
+        )
+        assert result["success"] is True
+        assert result["deleted_count"] == 4
+
+
+class TestBatchUploadStoreImagesTool:
+    def test_non_list_paths_rejected(self, mock_client: MagicMock) -> None:
+        result = batch_upload_store_images(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="phoneScreenshots",
+            file_paths="oops",  # type: ignore[arg-type]
+        )
+        assert result["success"] is False
+        mock_client.batch_upload_store_images.assert_not_called()
+
+    def test_calls_client(self, mock_client: MagicMock, tmp_path: Any) -> None:
+        files = []
+        for i in range(2):
+            f = tmp_path / f"s{i}.png"
+            f.write_bytes(b"\x89PNG")
+            files.append(str(f))
+        mock_client.batch_upload_store_images.return_value = BatchImageUploadResult(
+            success=True,
+            package_name="com.example.app",
+            language="en-US",
+            image_type="phoneScreenshots",
+            uploaded=[StoreImage(id="img-1", url="u"), StoreImage(id="img-2", url="u")],
+            successful_count=2,
+            failed_count=0,
+            message="ok",
+        )
+
+        result = batch_upload_store_images(
+            package_name="com.example.app",
+            language="en-US",
+            image_type="phoneScreenshots",
+            file_paths=files,
+        )
+
+        assert result["success"] is True
+        assert result["successful_count"] == 2
+        mock_client.batch_upload_store_images.assert_called_once_with(
+            "com.example.app", "en-US", "phoneScreenshots", files
+        )

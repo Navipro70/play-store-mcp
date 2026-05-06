@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from play_store_mcp.models import (
     AppDetails,
     DeploymentResult,
@@ -271,3 +273,35 @@ class TestExpansionFile:
         assert expansion.version_code == 100
         assert expansion.expansion_file_type == "main"
         assert expansion.file_size == 104857600
+
+
+# =========================================================================
+# Group #1 — image models
+# =========================================================================
+
+
+def test_image_type_enum_values() -> None:
+    from play_store_mcp.models import ImageType
+
+    assert ImageType.ICON.value == "icon"
+    assert ImageType.FEATURE_GRAPHIC.value == "featureGraphic"
+    assert ImageType.PHONE_SCREENSHOTS.value == "phoneScreenshots"
+    # 8 valid types per Discovery v3 (no promoGraphic, no Unspecified)
+    assert len(list(ImageType)) == 8
+
+
+def test_store_image_minimal() -> None:
+    from play_store_mcp.models import StoreImage
+
+    img = StoreImage(id="x", url="u")
+    assert img.sha1 is None
+    assert img.sha256 is None
+
+
+def test_store_image_required_fields() -> None:
+    from pydantic import ValidationError
+
+    from play_store_mcp.models import StoreImage
+
+    with pytest.raises(ValidationError):
+        StoreImage(url="u")  # type: ignore[call-arg]

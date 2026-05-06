@@ -1264,3 +1264,346 @@ class TestEditFailures:
 
         with pytest.raises(HttpError):
             client._commit_edit("com.example.app", "edit-123")
+
+
+# =========================================================================
+# Group #1 — edits.images (StoreImage tools)
+# =========================================================================
+
+
+class TestStoreImagesValidation:
+    """Validation helpers for the images group."""
+
+    def test_validate_image_file_resolves_path(self, tmp_path: Any) -> None:
+        png = tmp_path / "icon.png"
+        png.write_bytes(b"\x89PNG")
+        resolved = PlayStoreClient._validate_image_file(str(png))
+        assert resolved == png.resolve()
+
+    def test_validate_image_file_rejects_missing(self, tmp_path: Any) -> None:
+        with pytest.raises(ValueError, match="File not found"):
+            PlayStoreClient._validate_image_file(str(tmp_path / "no.png"))
+
+    def test_validate_image_file_rejects_directory(self, tmp_path: Any) -> None:
+        with pytest.raises(ValueError, match="Not a regular file"):
+            PlayStoreClient._validate_image_file(str(tmp_path))
+
+    def test_validate_image_file_rejects_bad_extension(self, tmp_path: Any) -> None:
+        gif = tmp_path / "img.gif"
+        gif.write_bytes(b"GIF89a")
+        with pytest.raises(ValueError, match=r"\.png/\.jpg/\.jpeg"):
+            PlayStoreClient._validate_image_file(str(gif))
+
+    def test_validate_image_file_traversal_canonicalised(self, tmp_path: Any) -> None:
+        png = tmp_path / "icon.png"
+        png.write_bytes(b"\x89PNG")
+        nested = tmp_path / "sub" / ".."
+        nested.mkdir(parents=True, exist_ok=True)
+        traversal = str(nested / "icon.png")
+        resolved = PlayStoreClient._validate_image_file(traversal)
+        assert resolved == png.resolve()
+        assert ".." not in str(resolved)
+
+    @pytest.mark.parametrize(
+        "ext",
+        [".png", ".PNG", ".jpg", ".JPG", ".jpeg", ".JPEG"],
+    )
+    def test_validate_image_file_accepts_case_variants(self, tmp_path: Any, ext: str) -> None:
+        f = tmp_path / f"a{ext}"
+        f.write_bytes(b"data")
+        assert PlayStoreClient._validate_image_file(str(f)) == f.resolve()
+
+
+class TestListStoreImages:
+    """list_store_images happy + failure paths."""
+
+    def test_happy_path(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-1"}
+        edits.images.return_value.list.return_value.execute.return_value = {
+            "images": [
+                {"id": "img-1", "url": "https://x", "sha1": "abc", "sha256": "def"},
+                {"id": "img-2", "url": "https://y"},
+            ]
+        }
+
+        result = client.list_store_images("com.example.app", "en-US", "icon")
+
+        assert len(result) == 2
+        assert result[0].id == "img-1"
+        assert result[0].sha256 == "def"
+        assert result[1].sha1 is None
+        edits.images.return_value.list.assert_called_once_with(
+            packageName="com.example.app",
+            editId="edit-1",
+            language="en-US",
+            imageType="icon",
+        )
+        edits.delete.return_value.execute.assert_called_once()
+
+    def test_unknown_image_type_rejected_before_api(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        with pytest.raises(ValueError):
+            client.list_store_images("com.example.app", "en-US", "bogus")
+        _mock_service.edits.return_value.images.return_value.list.assert_not_called()
+
+    def test_http_error_raises(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-1"}
+        edits.images.return_value.list.return_value.execute.side_effect = _make_http_error(
+            403, "forbidden"
+        )
+
+        with pytest.raises(PlayStoreClientError):
+            client.list_store_images("com.example.app", "en-US", "icon")
+
+        # Cleanup is in finally
+        edits.delete.return_value.execute.assert_called_once()
+
+
+class TestUploadStoreImage:
+    """upload_store_image happy + failure paths."""
+
+    def test_happy_path(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        png = tmp_path / "icon.png"
+        png.write_bytes(b"\x89PNG")
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-up"}
+        edits.images.return_value.upload.return_value.execute.return_value = {
+            "image": {
+                "id": "img-new",
+                "url": "https://cdn/img-new",
+                "sha256": "deadbeef",
+            }
+        }
+
+        result = client.upload_store_image("com.example.app", "en-US", "icon", str(png))
+
+        assert result.success is True
+        assert result.image is not None
+        assert result.image.id == "img-new"
+        assert result.image.sha256 == "deadbeef"
+        edits.commit.return_value.execute.assert_called_once_with()
+        edits.delete.return_value.execute.assert_not_called()
+        # Verify call shape
+        upload_call = edits.images.return_value.upload.call_args
+        assert upload_call.kwargs["packageName"] == "com.example.app"
+        assert upload_call.kwargs["editId"] == "edit-up"
+        assert upload_call.kwargs["language"] == "en-US"
+        assert upload_call.kwargs["imageType"] == "icon"
+
+    def test_returns_failure_on_missing_file(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        result = client.upload_store_image(
+            "com.example.app",
+            "en-US",
+            "icon",
+            str(tmp_path / "absent.png"),
+        )
+        assert result.success is False
+        assert "File not found" in result.message
+        # API not touched
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_failure_cleans_up_edit(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        png = tmp_path / "icon.png"
+        png.write_bytes(b"\x89PNG")
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-fail"}
+        edits.images.return_value.upload.return_value.execute.side_effect = _make_http_error(
+            400, "bad image dimensions"
+        )
+
+        result = client.upload_store_image("com.example.app", "en-US", "icon", str(png))
+
+        assert result.success is False
+        assert "Upload failed" in result.message
+        edits.commit.return_value.execute.assert_not_called()
+        edits.delete.assert_called_once_with(packageName="com.example.app", editId="edit-fail")
+
+
+class TestDeleteStoreImage:
+    """delete_store_image and delete_all_store_images."""
+
+    def test_delete_single_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-del"}
+        edits.images.return_value.delete.return_value.execute.return_value = None
+
+        result = client.delete_store_image("com.example.app", "en-US", "icon", "img-xyz")
+
+        assert result.success is True
+        assert result.deleted_count == 1
+        edits.images.return_value.delete.assert_called_once_with(
+            packageName="com.example.app",
+            editId="edit-del",
+            language="en-US",
+            imageType="icon",
+            imageId="img-xyz",
+        )
+        edits.commit.return_value.execute.assert_called_once()
+        # cleanup edit not used on success
+        edits.delete.assert_not_called()
+
+    def test_delete_single_failure_cleans_up(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-del-x"}
+        edits.images.return_value.delete.return_value.execute.side_effect = _make_http_error(
+            404, "not found"
+        )
+
+        result = client.delete_store_image("com.example.app", "en-US", "icon", "missing")
+
+        assert result.success is False
+        assert "Delete failed" in result.message
+        edits.delete.assert_called_once_with(packageName="com.example.app", editId="edit-del-x")
+        edits.commit.return_value.execute.assert_not_called()
+
+    def test_delete_all_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-da"}
+        edits.images.return_value.deleteall.return_value.execute.return_value = {
+            "deleted": [
+                {"id": "img-a"},
+                {"id": "img-b"},
+                {"id": "img-c"},
+            ]
+        }
+
+        result = client.delete_all_store_images("com.example.app", "en-US", "phoneScreenshots")
+
+        assert result.success is True
+        assert result.deleted_count == 3
+        edits.images.return_value.deleteall.assert_called_once_with(
+            packageName="com.example.app",
+            editId="edit-da",
+            language="en-US",
+            imageType="phoneScreenshots",
+        )
+        edits.commit.return_value.execute.assert_called_once()
+
+
+class TestBatchUploadStoreImages:
+    """batch_upload_store_images: one edit, multiple files."""
+
+    def test_happy_batch(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        files = [tmp_path / f"s{i}.png" for i in range(3)]
+        for f in files:
+            f.write_bytes(b"\x89PNG")
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-batch"}
+        edits.images.return_value.upload.return_value.execute.side_effect = [
+            {"image": {"id": f"img-{i}", "url": f"https://x/{i}"}} for i in range(3)
+        ]
+
+        result = client.batch_upload_store_images(
+            "com.example.app",
+            "en-US",
+            "phoneScreenshots",
+            [str(f) for f in files],
+        )
+
+        assert result.success is True
+        assert result.successful_count == 3
+        assert result.failed_count == 0
+        # Single edit session used
+        assert edits.insert.call_count == 1
+        edits.commit.return_value.execute.assert_called_once()
+        edits.delete.assert_not_called()
+        # Three uploads
+        assert edits.images.return_value.upload.call_count == 3
+
+    def test_empty_paths_short_circuits(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.batch_upload_store_images("com.example.app", "en-US", "icon", [])
+        assert result.success is False
+        assert "empty" in result.message.lower()
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_invalid_path_short_circuits(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        bad = tmp_path / "nope.png"
+        result = client.batch_upload_store_images("com.example.app", "en-US", "icon", [str(bad)])
+        assert result.success is False
+        assert "File not found" in result.message
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_partial_failure_cleans_up_and_reports(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        f1 = tmp_path / "a.png"
+        f2 = tmp_path / "b.png"
+        f3 = tmp_path / "c.png"
+        for f in (f1, f2, f3):
+            f.write_bytes(b"\x89PNG")
+        edits = _mock_service.edits.return_value
+        edits.insert.return_value.execute.return_value = {"id": "edit-partial"}
+        edits.images.return_value.upload.return_value.execute.side_effect = [
+            {"image": {"id": "img-1", "url": "u"}},
+            _make_http_error(400, "bad image"),
+        ]
+
+        result = client.batch_upload_store_images(
+            "com.example.app",
+            "en-US",
+            "phoneScreenshots",
+            [str(f1), str(f2), str(f3)],
+        )
+
+        assert result.success is False
+        assert result.successful_count == 1
+        assert result.failed_count == 2
+        edits.delete.assert_called_once_with(packageName="com.example.app", editId="edit-partial")
+        edits.commit.return_value.execute.assert_not_called()

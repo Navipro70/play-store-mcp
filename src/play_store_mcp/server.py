@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from play_store_mcp.client import PlayStoreClient, PlayStoreClientError
+from play_store_mcp.models import ImageType
 
 # Configure structured logging to stderr (stdout is reserved for MCP JSON-RPC)
 log_level = os.environ.get("PLAY_STORE_MCP_LOG_LEVEL", "INFO")
@@ -884,6 +886,231 @@ def batch_deploy(
         release_notes=release_notes,
         rollout_percentages=rollout_percentages,
     )
+    return result.model_dump()
+
+
+# =============================================================================
+# Store Images Tools (edits.images)
+# =============================================================================
+
+
+_VALID_IMAGE_TYPES: tuple[str, ...] = tuple(t.value for t in ImageType)
+
+
+def _validate_image_type_value(image_type: str) -> str | None:
+    """Return error message if image_type is unknown, None if valid."""
+    if image_type not in _VALID_IMAGE_TYPES:
+        return f"image_type must be one of: {', '.join(_VALID_IMAGE_TYPES)}; got: {image_type}"
+    return None
+
+
+def _validate_language_tag(language: str) -> str | None:
+    """Return error message if language tag is malformed, None if valid."""
+    if not re.match(r"^[a-z]{2,3}(-[A-Z0-9]{2,4})?$", language):
+        return f"language must be a BCP-47 tag like 'en-US', 'es-419', 'pt-BR'; got: {language}"
+    return None
+
+
+@mcp.tool()
+def validate_image_type(image_type: str) -> dict[str, Any]:
+    """Validate that an image_type matches the Publisher API enum.
+
+    Use before upload/delete tools to fail fast without burning quota. The
+    valid set is: phoneScreenshots, sevenInchScreenshots, tenInchScreenshots,
+    tvScreenshots, wearScreenshots, icon, featureGraphic, tvBanner.
+
+    Args:
+        image_type: Candidate image type string.
+
+    Returns:
+        Dict with `valid` (bool), `image_type`, and `errors` (list of strings).
+    """
+    err = _validate_image_type_value(image_type)
+    return {
+        "valid": err is None,
+        "image_type": image_type,
+        "errors": [err] if err else [],
+        "allowed": list(_VALID_IMAGE_TYPES),
+    }
+
+
+@mcp.tool()
+def list_store_images(
+    package_name: str,
+    language: str,
+    image_type: str,
+) -> dict[str, Any]:
+    """List uploaded images of one type for a localized store listing.
+
+    Use to inspect what icons/screenshots/feature graphics already exist for a
+    given app + locale before uploading new ones.
+
+    Args:
+        package_name: App package name (e.g. "com.example.app").
+        language: BCP-47 locale tag (e.g. "en-US", "es-419", "ko-KR").
+        image_type: One of the 8 supported types — call validate_image_type to
+            check.
+
+    Returns:
+        Dict with `success`, `images` (list of {id, url, sha1, sha256}),
+        `package_name`, `language`, `image_type`. On error: `success=False`
+        and `error`.
+    """
+    if err := _validate_image_type_value(image_type):
+        return {"success": False, "error": err}
+    if err := _validate_language_tag(language):
+        return {"success": False, "error": err}
+
+    client = get_client_from_context()
+    try:
+        images = client.list_store_images(package_name, language, image_type)
+        return {
+            "success": True,
+            "package_name": package_name,
+            "language": language,
+            "image_type": image_type,
+            "images": [img.model_dump() for img in images],
+        }
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def upload_store_image(
+    package_name: str,
+    language: str,
+    image_type: str,
+    file_path: str,
+) -> dict[str, Any]:
+    """Upload an image asset (screenshot, icon, feature graphic) to a localized
+    store listing.
+
+    Each call runs in its own edit session and is committed independently.
+    To upload multiple files of the same type at once, use
+    batch_upload_store_images instead — it commits all uploads in one edit
+    and is faster.
+
+    The file must be PNG or JPEG. Google enforces specific dimensions per
+    image_type (e.g. 1024x500 for featureGraphic, 512x512 for icon); on
+    dimension mismatch the API rejects the upload and the tool returns
+    success=False with the API error message.
+
+    Args:
+        package_name: App package name.
+        language: BCP-47 locale tag.
+        image_type: One of phoneScreenshots, sevenInchScreenshots,
+            tenInchScreenshots, tvScreenshots, wearScreenshots, icon,
+            featureGraphic, tvBanner.
+        file_path: Absolute path to the .png or .jpg/.jpeg file.
+
+    Returns:
+        Dict with `success`, `image` (id/url/sha1/sha256 on success), `message`,
+        and `error` (on failure).
+    """
+    if err := _validate_image_type_value(image_type):
+        return {"success": False, "error": err}
+    if err := _validate_language_tag(language):
+        return {"success": False, "error": err}
+
+    client = get_client_from_context()
+    result = client.upload_store_image(package_name, language, image_type, file_path)
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_store_image(
+    package_name: str,
+    language: str,
+    image_type: str,
+    image_id: str,
+) -> dict[str, Any]:
+    """Delete a single uploaded image by ID.
+
+    Use list_store_images to discover image IDs.
+
+    Args:
+        package_name: App package name.
+        language: BCP-47 locale tag.
+        image_type: One of the 8 supported types.
+        image_id: ID returned by list_store_images / upload_store_image.
+
+    Returns:
+        Dict with `success`, `message`, and `error` on failure.
+    """
+    if err := _validate_image_type_value(image_type):
+        return {"success": False, "error": err}
+    if err := _validate_language_tag(language):
+        return {"success": False, "error": err}
+    if not image_id:
+        return {"success": False, "error": "image_id cannot be empty"}
+
+    client = get_client_from_context()
+    result = client.delete_store_image(package_name, language, image_type, image_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_all_store_images(
+    package_name: str,
+    language: str,
+    image_type: str,
+) -> dict[str, Any]:
+    """Delete every image of a given type for a locale.
+
+    Useful when replacing the whole screenshot set for a locale: call
+    delete_all_store_images, then batch_upload_store_images with the new files.
+
+    Args:
+        package_name: App package name.
+        language: BCP-47 locale tag.
+        image_type: One of the 8 supported types.
+
+    Returns:
+        Dict with `success`, `deleted_count`, `message`, and `error` on failure.
+    """
+    if err := _validate_image_type_value(image_type):
+        return {"success": False, "error": err}
+    if err := _validate_language_tag(language):
+        return {"success": False, "error": err}
+
+    client = get_client_from_context()
+    result = client.delete_all_store_images(package_name, language, image_type)
+    return result.model_dump()
+
+
+@mcp.tool()
+def batch_upload_store_images(
+    package_name: str,
+    language: str,
+    image_type: str,
+    file_paths: list[str],
+) -> dict[str, Any]:
+    """Upload multiple images of the same type in one edit session.
+
+    All files are uploaded inside a single edit. If any upload fails the
+    entire edit is discarded and the partial state is reported. Use this when
+    refreshing a screenshot set — e.g. uploading 4 phoneScreenshots for one
+    locale at once.
+
+    Args:
+        package_name: App package name.
+        language: BCP-47 locale tag.
+        image_type: One of the 8 supported types.
+        file_paths: List of absolute paths to .png/.jpg/.jpeg files.
+
+    Returns:
+        Dict with `success`, `uploaded` (list of image dicts),
+        `successful_count`, `failed_count`, `message`, `error`.
+    """
+    if err := _validate_image_type_value(image_type):
+        return {"success": False, "error": err}
+    if err := _validate_language_tag(language):
+        return {"success": False, "error": err}
+    if not isinstance(file_paths, list):
+        return {"success": False, "error": "file_paths must be a list"}
+
+    client = get_client_from_context()
+    result = client.batch_upload_store_images(package_name, language, image_type, file_paths)
     return result.model_dump()
 
 

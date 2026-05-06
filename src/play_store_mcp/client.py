@@ -21,8 +21,10 @@ from googleapiclient.http import MediaFileUpload
 from play_store_mcp.models import (
     AppDetails,
     BatchDeploymentResult,
+    BatchImageUploadResult,
     DeploymentResult,
     ExpansionFile,
+    ImageType,
     InAppProduct,
     Listing,
     ListingUpdateResult,
@@ -30,6 +32,9 @@ from play_store_mcp.models import (
     Release,
     Review,
     ReviewReplyResult,
+    StoreImage,
+    StoreImageDeleteResult,
+    StoreImageUploadResult,
     SubscriptionProduct,
     SubscriptionPurchase,
     TesterInfo,
@@ -253,6 +258,98 @@ class PlayStoreClient:
             )
 
         return errors
+
+    @staticmethod
+    def _validate_image_file(file_path: str) -> Path:
+        """Resolve and validate an image file path.
+
+        Returns the resolved Path. Raises ValueError on any problem so server
+        layers can convert to a user-facing error.
+        """
+        resolved = Path(file_path).resolve()
+        if not resolved.exists():
+            raise ValueError(f"File not found: {file_path}")
+        if not resolved.is_file():
+            raise ValueError(f"Not a regular file: {file_path}")
+        if resolved.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            raise ValueError(f"Image must be .png/.jpg/.jpeg, got: {resolved.suffix}")
+        return resolved
+
+    @staticmethod
+    def _validate_mapping_file(file_path: str) -> Path:
+        """Resolve and validate a deobfuscation mapping file path."""
+        resolved = Path(file_path).resolve()
+        if not resolved.exists():
+            raise ValueError(f"File not found: {file_path}")
+        if not resolved.is_file():
+            raise ValueError(f"Not a regular file: {file_path}")
+        if resolved.suffix.lower() not in {".txt", ".zip", ".gz", ".map"}:
+            raise ValueError(
+                f"Deobfuscation file must be .txt/.zip/.gz/.map, got: {resolved.suffix}"
+            )
+        return resolved
+
+    @staticmethod
+    def _mask_token(token: str) -> str:
+        """Return a token redacted for logging (last 8 chars only)."""
+        if not token:
+            return "<empty>"
+        if len(token) <= 8:
+            return "..." + token[-2:]
+        return "..." + token[-8:]
+
+    @staticmethod
+    def _validate_order_id(order_id: str) -> None:
+        """Validate Google Play order ID format. Raises ValueError if invalid."""
+        if not order_id:
+            raise ValueError("order_id cannot be empty")
+        # Real order IDs look like GPA.XXXX-XXXX-XXXX-XXXXX. Be lenient on hyphen
+        # patterns since refunded/promo orders can deviate slightly. Reject only
+        # obvious garbage (whitespace, separators, missing dot).
+        if not re.match(r"^[A-Za-z0-9._\-]+$", order_id):
+            raise ValueError(f"order_id contains invalid characters: {order_id}")
+        if "." not in order_id:
+            raise ValueError(f"order_id should look like GPA.XXXX-XXXX-XXXX-XXXXX, got: {order_id}")
+
+    @staticmethod
+    def _validate_iso8601_period(value: str) -> None:
+        """Validate an ISO 8601 duration string (e.g. P1M, P1Y, P7D)."""
+        if not re.match(r"^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?$", value):
+            raise ValueError(
+                f"billing_period must be ISO 8601 duration (e.g. P1M, P1Y, P7D), got: {value}"
+            )
+
+    @staticmethod
+    def _patch_with_regions_version(request: Any, regions_version: str) -> Any:
+        """Append regionsVersion.version to the request URI.
+
+        google-api-python-client cannot pass parameter names containing dots,
+        so we splice the value into the URL by hand. See CLAUDE.md.
+        """
+        sep = "&" if "?" in request.uri else "?"
+        request.uri = f"{request.uri}{sep}regionsVersion.version={regions_version}"
+        return request
+
+    def _convert_region_prices(
+        self, package_name: str, currency_code: str, units: str, nanos: int
+    ) -> dict[str, Any]:
+        """Call monetization.convertRegionPrices and return the raw API response.
+
+        Used for converting a single base price (e.g. USD) to ~150 regions.
+        """
+        service = self._get_service()
+        body = {
+            "price": {
+                "currencyCode": currency_code,
+                "units": units,
+                "nanos": nanos,
+            }
+        }
+        return (
+            service.monetization()
+            .convertRegionPrices(packageName=package_name, body=body)
+            .execute()
+        )
 
     @retry_with_backoff
     def _get_service(self) -> AndroidPublisherResource:
@@ -1718,3 +1815,384 @@ class PlayStoreClient:
             raise PlayStoreClientError(f"Failed to get expansion file: {e.reason}") from e
         finally:
             self._delete_edit(package_name, edit_id)
+
+    # =========================================================================
+    # Store Images API (edits.images)
+    # =========================================================================
+
+    @staticmethod
+    def _image_from_api(data: dict[str, Any]) -> StoreImage:
+        return StoreImage(
+            id=data.get("id", ""),
+            url=data.get("url", ""),
+            sha1=data.get("sha1"),
+            sha256=data.get("sha256"),
+        )
+
+    @staticmethod
+    def _image_mimetype(path: Path) -> str:
+        return "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+
+    def list_store_images(
+        self,
+        package_name: str,
+        language: str,
+        image_type: ImageType | str,
+    ) -> list[StoreImage]:
+        """List uploaded images of a given type for a localized listing.
+
+        Args:
+            package_name: App package name.
+            language: BCP-47 locale tag.
+            image_type: Image type (ImageType enum or matching string).
+
+        Returns:
+            List of StoreImage entries.
+
+        Raises:
+            PlayStoreClientError: On API failure.
+        """
+        type_value = ImageType(image_type).value
+        self._logger.info(
+            "Listing store images",
+            package_name=package_name,
+            language=language,
+            image_type=type_value,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            result = (
+                service.edits()
+                .images()
+                .list(
+                    packageName=package_name,
+                    editId=edit_id,
+                    language=language,
+                    imageType=type_value,
+                )
+                .execute()
+            )
+            return [self._image_from_api(img) for img in result.get("images", [])]
+        except HttpError as e:
+            self._logger.exception("Failed to list images", error=str(e))
+            raise PlayStoreClientError(f"Failed to list images: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def upload_store_image(
+        self,
+        package_name: str,
+        language: str,
+        image_type: ImageType | str,
+        file_path: str,
+    ) -> StoreImageUploadResult:
+        """Upload one image asset to a localized listing.
+
+        Each call is its own edit session. To upload multiple files in one
+        commit, use ``batch_upload_store_images``.
+
+        Args:
+            package_name: App package name.
+            language: BCP-47 locale tag.
+            image_type: Image type.
+            file_path: Path to .png/.jpg/.jpeg file.
+
+        Returns:
+            StoreImageUploadResult.
+        """
+        type_value = ImageType(image_type).value
+        self._logger.info(
+            "Uploading store image",
+            package_name=package_name,
+            language=language,
+            image_type=type_value,
+            file_path=file_path,
+        )
+
+        try:
+            resolved = self._validate_image_file(file_path)
+        except ValueError as e:
+            return StoreImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                message=str(e),
+                error="ValueError",
+            )
+
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            media = MediaFileUpload(
+                str(resolved),
+                mimetype=self._image_mimetype(resolved),
+                resumable=True,
+            )
+            response = (
+                service.edits()
+                .images()
+                .upload(
+                    packageName=package_name,
+                    editId=edit_id,
+                    language=language,
+                    imageType=type_value,
+                    media_body=media,
+                )
+                .execute()
+            )
+            self._commit_edit(package_name, edit_id)
+
+            image_data = response.get("image") or {}
+            return StoreImageUploadResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                image=self._image_from_api(image_data),
+                message=f"Uploaded {type_value} for {language}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to upload image", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return StoreImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                message=f"Upload failed: {e.reason}",
+                error=str(e),
+            )
+        except Exception as e:
+            self._logger.exception("Failed to upload image", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return StoreImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                message=f"Upload failed: {e}",
+                error=str(e),
+            )
+
+    def delete_store_image(
+        self,
+        package_name: str,
+        language: str,
+        image_type: ImageType | str,
+        image_id: str,
+    ) -> StoreImageDeleteResult:
+        """Delete a single image by ID."""
+        type_value = ImageType(image_type).value
+        self._logger.info(
+            "Deleting store image",
+            package_name=package_name,
+            language=language,
+            image_type=type_value,
+            image_id=image_id,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            service.edits().images().delete(
+                packageName=package_name,
+                editId=edit_id,
+                language=language,
+                imageType=type_value,
+                imageId=image_id,
+            ).execute()
+            self._commit_edit(package_name, edit_id)
+            return StoreImageDeleteResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                image_id=image_id,
+                deleted_count=1,
+                message=f"Deleted image {image_id}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to delete image", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return StoreImageDeleteResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                image_id=image_id,
+                message=f"Delete failed: {e.reason}",
+                error=str(e),
+            )
+
+    def delete_all_store_images(
+        self,
+        package_name: str,
+        language: str,
+        image_type: ImageType | str,
+    ) -> StoreImageDeleteResult:
+        """Delete all images of a given type for a locale."""
+        type_value = ImageType(image_type).value
+        self._logger.info(
+            "Deleting all store images",
+            package_name=package_name,
+            language=language,
+            image_type=type_value,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            response = (
+                service.edits()
+                .images()
+                .deleteall(
+                    packageName=package_name,
+                    editId=edit_id,
+                    language=language,
+                    imageType=type_value,
+                )
+                .execute()
+            )
+            self._commit_edit(package_name, edit_id)
+            deleted = response.get("deleted", []) if isinstance(response, dict) else []
+            return StoreImageDeleteResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                deleted_count=len(deleted),
+                message=f"Deleted {len(deleted)} {type_value} images for {language}",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to delete-all images", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return StoreImageDeleteResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                message=f"Delete failed: {e.reason}",
+                error=str(e),
+            )
+
+    def batch_upload_store_images(
+        self,
+        package_name: str,
+        language: str,
+        image_type: ImageType | str,
+        file_paths: list[str],
+    ) -> BatchImageUploadResult:
+        """Upload multiple images of one type in a single edit session.
+
+        Faster than calling ``upload_store_image`` N times because there is one
+        ``insert`` and one ``commit``. If any single upload fails, the entire
+        edit is discarded and the result reflects the partial state.
+
+        Args:
+            package_name: App package name.
+            language: BCP-47 locale tag.
+            image_type: Image type.
+            file_paths: Paths to .png/.jpg/.jpeg files.
+
+        Returns:
+            BatchImageUploadResult.
+        """
+        type_value = ImageType(image_type).value
+        self._logger.info(
+            "Batch uploading store images",
+            package_name=package_name,
+            language=language,
+            image_type=type_value,
+            count=len(file_paths),
+        )
+
+        if not file_paths:
+            return BatchImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                message="file_paths is empty",
+                error="ValueError",
+            )
+
+        try:
+            resolved_paths = [self._validate_image_file(p) for p in file_paths]
+        except ValueError as e:
+            return BatchImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                message=str(e),
+                error="ValueError",
+            )
+
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        uploaded: list[StoreImage] = []
+
+        try:
+            for path in resolved_paths:
+                media = MediaFileUpload(
+                    str(path),
+                    mimetype=self._image_mimetype(path),
+                    resumable=True,
+                )
+                response = (
+                    service.edits()
+                    .images()
+                    .upload(
+                        packageName=package_name,
+                        editId=edit_id,
+                        language=language,
+                        imageType=type_value,
+                        media_body=media,
+                    )
+                    .execute()
+                )
+                uploaded.append(self._image_from_api(response.get("image") or {}))
+
+            self._commit_edit(package_name, edit_id)
+            return BatchImageUploadResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                uploaded=uploaded,
+                successful_count=len(uploaded),
+                failed_count=0,
+                message=f"Uploaded {len(uploaded)} {type_value} images for {language}",
+            )
+        except HttpError as e:
+            self._logger.exception("Batch upload failed", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return BatchImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                uploaded=uploaded,
+                successful_count=len(uploaded),
+                failed_count=len(resolved_paths) - len(uploaded),
+                message=f"Batch upload failed at file #{len(uploaded) + 1}: {e.reason}",
+                error=str(e),
+            )
+        except Exception as e:
+            self._logger.exception("Batch upload failed", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return BatchImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=type_value,
+                uploaded=uploaded,
+                successful_count=len(uploaded),
+                failed_count=len(resolved_paths) - len(uploaded),
+                message=f"Batch upload failed at file #{len(uploaded) + 1}: {e}",
+                error=str(e),
+            )

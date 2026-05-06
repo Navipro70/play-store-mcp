@@ -22,6 +22,17 @@ Complete reference for all MCP tools provided by the Play Store MCP server.
 | [`update_listing`](tools/store-listings.md#update_listing) | Update store listing text and video |
 | [`list_all_listings`](tools/store-listings.md#list_all_listings) | List all store listings across languages |
 
+## Store Images Tools
+
+| Tool | Description |
+|---|---|
+| [`list_store_images`](tools/store-images.md#list_store_images) | List uploaded images of one type for a localized listing |
+| [`upload_store_image`](tools/store-images.md#upload_store_image) | Upload one image asset (own edit session) |
+| [`batch_upload_store_images`](tools/store-images.md#batch_upload_store_images) | Upload multiple images in a single edit session |
+| [`delete_store_image`](tools/store-images.md#delete_store_image) | Delete a single image by ID |
+| [`delete_all_store_images`](tools/store-images.md#delete_all_store_images) | Delete every image of a given type for a locale |
+| [`validate_image_type`](tools/store-images.md#validate_image_type) | Verify an `image_type` value before calling the API |
+
 ## Review Tools
 
 | Tool | Description |
