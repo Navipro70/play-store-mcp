@@ -1607,3 +1607,233 @@ class TestBatchUploadStoreImages:
         assert result.failed_count == 2
         edits.delete.assert_called_once_with(packageName="com.example.app", editId="edit-partial")
         edits.commit.return_value.execute.assert_not_called()
+
+
+# =========================================================================
+# Group #3 — purchases.products + orders.refund
+# =========================================================================
+
+
+class TestGetProductPurchase:
+    def test_happy_path(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.purchases.return_value.products.return_value.get.return_value.execute.return_value = {
+            "productId": "premium",
+            "purchaseState": 0,
+            "consumptionState": 0,
+            "orderId": "GPA.0000-1111-2222-3333",
+            "purchaseTimeMillis": "1700000000000",
+            "acknowledgementState": 1,
+            "regionCode": "US",
+            "quantity": 1,
+        }
+
+        result = client.get_product_purchase("com.example.app", "premium", "tok-abcdefgh")
+
+        assert result.product_id == "premium"
+        assert result.purchase_state == 0
+        assert result.acknowledgement_state == 1
+        assert result.order_id == "GPA.0000-1111-2222-3333"
+        assert result.region_code == "US"
+        assert result.purchase_time is not None
+        _mock_service.purchases.return_value.products.return_value.get.assert_called_once_with(
+            packageName="com.example.app",
+            productId="premium",
+            token="tok-abcdefgh",
+        )
+
+    def test_empty_token_rejected(self, client: PlayStoreClient) -> None:
+        with pytest.raises(ValueError):
+            client.get_product_purchase("com.example.app", "premium", "")
+
+    def test_404_raises_client_error(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.purchases.return_value.products.return_value.get.return_value.execute.side_effect = _make_http_error(
+            404, "not found"
+        )
+        with pytest.raises(PlayStoreClientError):
+            client.get_product_purchase("com.example.app", "premium", "tok-abcdefgh")
+
+
+class TestAcknowledgeProductPurchase:
+    def test_happy_no_payload(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.purchases.return_value.products.return_value.acknowledge.return_value.execute.return_value = None
+        result = client.acknowledge_product_purchase("com.example.app", "premium", "tok-abcdefgh")
+
+        assert result.success is True
+        _mock_service.purchases.return_value.products.return_value.acknowledge.assert_called_once_with(
+            packageName="com.example.app",
+            productId="premium",
+            token="tok-abcdefgh",
+            body={},
+        )
+
+    def test_happy_with_payload(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.purchases.return_value.products.return_value.acknowledge.return_value.execute.return_value = None
+        result = client.acknowledge_product_purchase(
+            "com.example.app", "premium", "tok-abcdefgh", developer_payload="x"
+        )
+
+        assert result.success is True
+        _mock_service.purchases.return_value.products.return_value.acknowledge.assert_called_once_with(
+            packageName="com.example.app",
+            productId="premium",
+            token="tok-abcdefgh",
+            body={"developerPayload": "x"},
+        )
+
+    def test_payload_too_large_rejected(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.acknowledge_product_purchase(
+            "com.example.app",
+            "premium",
+            "tok-abcdefgh",
+            developer_payload="x" * 1025,
+        )
+        assert result.success is False
+        assert "1024" in result.message
+        _mock_service.purchases.return_value.products.return_value.acknowledge.assert_not_called()
+
+    def test_empty_token_rejected(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.acknowledge_product_purchase("com.example.app", "premium", "")
+        assert result.success is False
+        _mock_service.purchases.return_value.products.return_value.acknowledge.assert_not_called()
+
+    def test_http_error_returns_failure_dict(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.purchases.return_value.products.return_value.acknowledge.return_value.execute.side_effect = _make_http_error(
+            410, "gone"
+        )
+        result = client.acknowledge_product_purchase("com.example.app", "premium", "tok-abcdefgh")
+        assert result.success is False
+        assert "Acknowledge failed" in result.message
+
+
+class TestConsumeProductPurchase:
+    def test_happy(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.purchases.return_value.products.return_value.consume.return_value.execute.return_value = None
+        result = client.consume_product_purchase("com.example.app", "coins", "tok-abcdefgh")
+        assert result.success is True
+        assert result.operation == "consume"
+
+    def test_empty_token(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.consume_product_purchase("com.example.app", "coins", "")
+        assert result.success is False
+        _mock_service.purchases.return_value.products.return_value.consume.assert_not_called()
+
+
+class TestRefundOrder:
+    def test_invalid_order_id_short_circuits(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.refund_order("com.example.app", "garbage")
+        assert result.success is False
+        _mock_service.orders.return_value.refund.assert_not_called()
+
+    def test_happy_no_revoke(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.orders.return_value.refund.return_value.execute.return_value = None
+        result = client.refund_order("com.example.app", "GPA.0001-2222-3333-4444")
+        assert result.success is True
+        assert result.revoked is False
+        _mock_service.orders.return_value.refund.assert_called_once_with(
+            packageName="com.example.app",
+            orderId="GPA.0001-2222-3333-4444",
+            revoke=False,
+        )
+
+    def test_happy_with_revoke(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.orders.return_value.refund.return_value.execute.return_value = None
+        result = client.refund_order("com.example.app", "GPA.0001-2222-3333-4444", revoke=True)
+        assert result.success is True
+        assert result.revoked is True
+        assert "revoked" in result.message
+        _mock_service.orders.return_value.refund.assert_called_once_with(
+            packageName="com.example.app",
+            orderId="GPA.0001-2222-3333-4444",
+            revoke=True,
+        )
+
+    def test_http_error_returns_failure(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        _mock_service.orders.return_value.refund.return_value.execute.side_effect = (
+            _make_http_error(400, "bad request")
+        )
+        result = client.refund_order("com.example.app", "GPA.0001-2222-3333-4444")
+        assert result.success is False
+        assert "Refund failed" in result.message
+
+
+class TestMaskToken:
+    @pytest.mark.parametrize(
+        "token,expected",
+        [
+            ("", "<empty>"),
+            ("ab", "...ab"),
+            ("abcd", "...cd"),
+            ("a" * 100, "..." + "a" * 8),
+        ],
+    )
+    def test_mask(self, token: str, expected: str) -> None:
+        assert PlayStoreClient._mask_token(token) == expected
+
+
+class TestValidateOrderId:
+    @pytest.mark.parametrize(
+        "order_id",
+        ["GPA.0001-1111-2222-3333", "GPA.dev.test_order", "ABC.xyz"],
+    )
+    def test_valid(self, order_id: str) -> None:
+        PlayStoreClient._validate_order_id(order_id)
+
+    @pytest.mark.parametrize(
+        "order_id",
+        ["", "no_dot", "has spaces.x", "tab\tx", "a/b"],
+    )
+    def test_invalid(self, order_id: str) -> None:
+        with pytest.raises(ValueError):
+            PlayStoreClient._validate_order_id(order_id)

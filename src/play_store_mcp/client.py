@@ -29,6 +29,9 @@ from play_store_mcp.models import (
     Listing,
     ListingUpdateResult,
     Order,
+    ProductPurchase,
+    PurchaseAckResult,
+    RefundResult,
     Release,
     Review,
     ReviewReplyResult,
@@ -2194,5 +2197,242 @@ class PlayStoreClient:
                 successful_count=len(uploaded),
                 failed_count=len(resolved_paths) - len(uploaded),
                 message=f"Batch upload failed at file #{len(uploaded) + 1}: {e}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Product Purchases & Refunds (purchases.products + orders)
+    # =========================================================================
+
+    @staticmethod
+    def _product_purchase_from_api(
+        package_name: str,
+        product_id: str,
+        token: str,
+        data: dict[str, Any],
+    ) -> ProductPurchase:
+        purchase_time = None
+        if data.get("purchaseTimeMillis"):
+            try:
+                purchase_time = datetime.fromtimestamp(
+                    int(data["purchaseTimeMillis"]) / 1000, tz=UTC
+                )
+            except (TypeError, ValueError, OSError):
+                purchase_time = None
+        return ProductPurchase(
+            package_name=package_name,
+            product_id=data.get("productId") or product_id,
+            purchase_token=token,
+            purchase_state=data.get("purchaseState"),
+            consumption_state=data.get("consumptionState"),
+            purchase_time=purchase_time,
+            order_id=data.get("orderId"),
+            acknowledgement_state=data.get("acknowledgementState"),
+            region_code=data.get("regionCode"),
+            purchase_type=data.get("purchaseType"),
+            quantity=data.get("quantity"),
+        )
+
+    def get_product_purchase(
+        self,
+        package_name: str,
+        product_id: str,
+        token: str,
+    ) -> ProductPurchase:
+        """Server-side validation of a one-time product purchase.
+
+        Mirrors `purchases.products.get`. Use to verify a purchase from a
+        client app or webhook before granting entitlement.
+        """
+        if not token:
+            raise ValueError("token cannot be empty")
+        self._logger.info(
+            "Fetching product purchase",
+            package_name=package_name,
+            product_id=product_id,
+            token=self._mask_token(token),
+        )
+        service = self._get_service()
+        try:
+            data = (
+                service.purchases()
+                .products()
+                .get(packageName=package_name, productId=product_id, token=token)
+                .execute()
+            )
+            return self._product_purchase_from_api(package_name, product_id, token, data)
+        except HttpError as e:
+            self._logger.exception("Failed to get product purchase", error=str(e))
+            raise PlayStoreClientError(f"Failed to get product purchase: {e.reason}") from e
+
+    def acknowledge_product_purchase(
+        self,
+        package_name: str,
+        product_id: str,
+        token: str,
+        developer_payload: str | None = None,
+    ) -> PurchaseAckResult:
+        """Acknowledge a one-time product purchase.
+
+        Google requires acknowledgement within 3 days of purchase or the order
+        is auto-refunded. ``developer_payload`` is optional and capped at
+        ~1 KB by Google.
+        """
+        if not token:
+            return PurchaseAckResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="acknowledge",
+                message="token cannot be empty",
+                error="ValueError",
+            )
+        if developer_payload is not None and len(developer_payload.encode("utf-8")) > 1024:
+            return PurchaseAckResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="acknowledge",
+                message="developer_payload exceeds 1024 bytes",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Acknowledging product purchase",
+            package_name=package_name,
+            product_id=product_id,
+            token=self._mask_token(token),
+        )
+        service = self._get_service()
+        body = {"developerPayload": developer_payload} if developer_payload else {}
+        try:
+            service.purchases().products().acknowledge(
+                packageName=package_name,
+                productId=product_id,
+                token=token,
+                body=body,
+            ).execute()
+            return PurchaseAckResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation="acknowledge",
+                message="Purchase acknowledged",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to acknowledge purchase", error=str(e))
+            return PurchaseAckResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="acknowledge",
+                message=f"Acknowledge failed: {e.reason}",
+                error=str(e),
+            )
+
+    def consume_product_purchase(
+        self,
+        package_name: str,
+        product_id: str,
+        token: str,
+    ) -> PurchaseAckResult:
+        """Consume a consumable one-time product purchase.
+
+        Marks the purchase consumed so the user can buy the product again.
+        Only meaningful for consumable IAPs (rewards/coins/etc.).
+        """
+        if not token:
+            return PurchaseAckResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="consume",
+                message="token cannot be empty",
+                error="ValueError",
+            )
+        self._logger.info(
+            "Consuming product purchase",
+            package_name=package_name,
+            product_id=product_id,
+            token=self._mask_token(token),
+        )
+        service = self._get_service()
+        try:
+            service.purchases().products().consume(
+                packageName=package_name,
+                productId=product_id,
+                token=token,
+            ).execute()
+            return PurchaseAckResult(
+                success=True,
+                package_name=package_name,
+                product_id=product_id,
+                operation="consume",
+                message="Purchase consumed",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to consume purchase", error=str(e))
+            return PurchaseAckResult(
+                success=False,
+                package_name=package_name,
+                product_id=product_id,
+                operation="consume",
+                message=f"Consume failed: {e.reason}",
+                error=str(e),
+            )
+
+    def refund_order(
+        self,
+        package_name: str,
+        order_id: str,
+        revoke: bool = False,
+    ) -> RefundResult:
+        """Refund (and optionally revoke) an order.
+
+        ``revoke=True`` strips the user's entitlement in addition to refunding
+        money. Default is False — refund without revoking.
+        """
+        try:
+            self._validate_order_id(order_id)
+        except ValueError as e:
+            return RefundResult(
+                success=False,
+                package_name=package_name,
+                order_id=order_id,
+                revoked=False,
+                message=str(e),
+                error="ValueError",
+            )
+        self._logger.info(
+            "Refunding order",
+            package_name=package_name,
+            order_id=order_id,
+            revoke=revoke,
+        )
+        service = self._get_service()
+        try:
+            service.orders().refund(
+                packageName=package_name,
+                orderId=order_id,
+                revoke=revoke,
+            ).execute()
+            return RefundResult(
+                success=True,
+                package_name=package_name,
+                order_id=order_id,
+                revoked=revoke,
+                message=(
+                    f"Refunded order {order_id} (revoked)"
+                    if revoke
+                    else f"Refunded order {order_id}"
+                ),
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to refund order", error=str(e))
+            return RefundResult(
+                success=False,
+                package_name=package_name,
+                order_id=order_id,
+                revoked=False,
+                message=f"Refund failed: {e.reason}",
                 error=str(e),
             )

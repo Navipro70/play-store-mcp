@@ -989,3 +989,144 @@ class TestBatchUploadStoreImagesTool:
         mock_client.batch_upload_store_images.assert_called_once_with(
             "com.example.app", "en-US", "phoneScreenshots", files
         )
+
+
+# =========================================================================
+# Group #3 — purchases.products + orders.refund server tools
+# =========================================================================
+
+
+from play_store_mcp.models import (  # noqa: E402
+    ProductPurchase as _ProductPurchase,
+)
+from play_store_mcp.models import (  # noqa: E402
+    PurchaseAckResult as _PurchaseAckResult,
+)
+from play_store_mcp.models import (  # noqa: E402
+    RefundResult as _RefundResult,
+)
+from play_store_mcp.server import (  # noqa: E402
+    acknowledge_product_purchase,
+    consume_product_purchase,
+    get_product_purchase,
+    refund_order,
+)
+
+
+class TestGetProductPurchaseTool:
+    def test_empty_token(self, mock_client: MagicMock) -> None:
+        result = get_product_purchase(package_name="com.example.app", product_id="x", token="")
+        assert result["success"] is False
+        mock_client.get_product_purchase.assert_not_called()
+
+    def test_happy(self, mock_client: MagicMock) -> None:
+        mock_client.get_product_purchase.return_value = _ProductPurchase(
+            package_name="com.example.app",
+            product_id="premium",
+            purchase_token="tok",
+            purchase_state=0,
+            consumption_state=0,
+            order_id="GPA.0000-1111-2222-3333",
+            acknowledgement_state=1,
+            region_code="US",
+        )
+
+        result = get_product_purchase(
+            package_name="com.example.app",
+            product_id="premium",
+            token="tok-abcdefgh",
+        )
+
+        assert result["success"] is True
+        assert result["product_id"] == "premium"
+        mock_client.get_product_purchase.assert_called_once_with(
+            "com.example.app", "premium", "tok-abcdefgh"
+        )
+
+    def test_wraps_client_error(self, mock_client: MagicMock) -> None:
+        mock_client.get_product_purchase.side_effect = PlayStoreClientError("Boom")
+        result = get_product_purchase(
+            package_name="com.example.app",
+            product_id="premium",
+            token="tok",
+        )
+        assert result["success"] is False
+        assert "Boom" in result["error"]
+
+
+class TestAcknowledgePurchaseTool:
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.acknowledge_product_purchase.return_value = _PurchaseAckResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="x",
+            operation="acknowledge",
+            message="OK",
+        )
+        result = acknowledge_product_purchase(
+            package_name="com.example.app",
+            product_id="x",
+            token="tok",
+            developer_payload="meta",
+        )
+        assert result["success"] is True
+        mock_client.acknowledge_product_purchase.assert_called_once_with(
+            "com.example.app", "x", "tok", "meta"
+        )
+
+
+class TestConsumePurchaseTool:
+    def test_calls_client(self, mock_client: MagicMock) -> None:
+        mock_client.consume_product_purchase.return_value = _PurchaseAckResult(
+            success=True,
+            package_name="com.example.app",
+            product_id="coins",
+            operation="consume",
+            message="ok",
+        )
+        result = consume_product_purchase(
+            package_name="com.example.app", product_id="coins", token="tok-1234"
+        )
+        assert result["success"] is True
+
+
+class TestRefundOrderTool:
+    @pytest.mark.parametrize("bad", ["", "no_dot", "has spaces.x", "tab\tx"])
+    def test_invalid_order_id_rejected(self, mock_client: MagicMock, bad: str) -> None:
+        result = refund_order(package_name="com.example.app", order_id=bad)
+        assert result["success"] is False
+        mock_client.refund_order.assert_not_called()
+
+    def test_happy_default_revoke_false(self, mock_client: MagicMock) -> None:
+        mock_client.refund_order.return_value = _RefundResult(
+            success=True,
+            package_name="com.example.app",
+            order_id="GPA.0001-2222-3333-4444",
+            revoked=False,
+            message="ok",
+        )
+        result = refund_order(package_name="com.example.app", order_id="GPA.0001-2222-3333-4444")
+        assert result["success"] is True
+        assert result["revoked"] is False
+        mock_client.refund_order.assert_called_once_with(
+            "com.example.app", "GPA.0001-2222-3333-4444", False
+        )
+
+    def test_explicit_revoke_true(self, mock_client: MagicMock) -> None:
+        mock_client.refund_order.return_value = _RefundResult(
+            success=True,
+            package_name="com.example.app",
+            order_id="GPA.0001-2222-3333-4444",
+            revoked=True,
+            message="ok",
+        )
+        result = refund_order(
+            package_name="com.example.app",
+            order_id="GPA.0001-2222-3333-4444",
+            revoke=True,
+        )
+        assert result["success"] is True
+        assert result["revoked"] is True
+        mock_client.refund_order.assert_called_once_with(
+            "com.example.app", "GPA.0001-2222-3333-4444", True
+        )

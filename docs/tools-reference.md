@@ -48,6 +48,15 @@ Complete reference for all MCP tools provided by the Play Store MCP server.
 | [`get_subscription_status`](tools/subscriptions.md#get_subscription_status) | Check subscription purchase status |
 | [`list_voided_purchases`](tools/subscriptions.md#list_voided_purchases) | List voided purchases |
 
+## Purchases & Refunds Tools
+
+| Tool | Description |
+|---|---|
+| [`get_product_purchase`](tools/purchases.md#get_product_purchase) | Server-side validation of a one-time product purchase |
+| [`acknowledge_product_purchase`](tools/purchases.md#acknowledge_product_purchase) | Acknowledge a purchase within 3 days |
+| [`consume_product_purchase`](tools/purchases.md#consume_product_purchase) | Consume a consumable IAP |
+| [`refund_order`](tools/purchases.md#refund_order) | Refund (and optionally revoke) an order |
+
 ## In-App Products Tools
 
 | Tool | Description |

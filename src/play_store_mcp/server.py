@@ -1115,6 +1115,148 @@ def batch_upload_store_images(
 
 
 # =============================================================================
+# Product Purchases & Refunds Tools (Group #3)
+# =============================================================================
+
+
+_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
+
+
+def _validate_order_id_value(order_id: str) -> str | None:
+    """Return error message if order_id format is invalid, None if valid."""
+    if not order_id:
+        return "order_id cannot be empty"
+    if not _ORDER_ID_RE.match(order_id):
+        return f"order_id contains invalid characters: {order_id}"
+    if "." not in order_id:
+        return "order_id should look like GPA.XXXX-XXXX-XXXX-XXXXX"
+    return None
+
+
+@mcp.tool()
+def get_product_purchase(
+    package_name: str,
+    product_id: str,
+    token: str,
+) -> dict[str, Any]:
+    """Server-side validation of a one-time product purchase.
+
+    Use to verify that a purchase token from a client app or webhook
+    actually corresponds to a real, paid purchase. Read-only. Does not
+    consume the purchase or grant entitlement on its own.
+
+    The 3-day acknowledgement window matters here: if the purchase has
+    `acknowledgement_state == 0` and is older than 3 days, Google has likely
+    auto-refunded it.
+
+    Args:
+        package_name: App package name.
+        product_id: Product SKU.
+        token: Purchase token from BillingClient or Real Time Developer
+            Notification (RTDN). Tokens are sensitive — they are masked when
+            logged.
+
+    Returns:
+        Dict with `success`, the purchase record fields (purchase_state,
+        consumption_state, order_id, region_code, etc.), or `error`.
+    """
+    if not token:
+        return {"success": False, "error": "token cannot be empty"}
+
+    client = get_client_from_context()
+    try:
+        purchase = client.get_product_purchase(package_name, product_id, token)
+        result = purchase.model_dump(mode="json")
+        result["success"] = True
+        return result
+    except PlayStoreClientError as e:
+        return {"success": False, "error": str(e)}
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def acknowledge_product_purchase(
+    package_name: str,
+    product_id: str,
+    token: str,
+    developer_payload: str | None = None,
+) -> dict[str, Any]:
+    """Acknowledge a one-time product purchase.
+
+    **Required within 3 days** of purchase, otherwise Google auto-refunds.
+    For backend services that handle acknowledgement server-side instead of
+    in the client app.
+
+    Args:
+        package_name: App package name.
+        product_id: Product SKU.
+        token: Purchase token. Masked in logs.
+        developer_payload: Optional developer-controlled string attached to the
+            purchase. Capped at 1024 bytes (UTF-8 encoded).
+
+    Returns:
+        Dict with `success`, `message`, `error`.
+    """
+    client = get_client_from_context()
+    result = client.acknowledge_product_purchase(package_name, product_id, token, developer_payload)
+    return result.model_dump()
+
+
+@mcp.tool()
+def consume_product_purchase(
+    package_name: str,
+    product_id: str,
+    token: str,
+) -> dict[str, Any]:
+    """Consume a consumable one-time product purchase.
+
+    Marks the purchase consumed so the user can buy this SKU again. Only
+    relevant for consumable IAPs (coins, gems, single-use rewards). Don't
+    call for non-consumable products.
+
+    Args:
+        package_name: App package name.
+        product_id: Product SKU.
+        token: Purchase token. Masked in logs.
+
+    Returns:
+        Dict with `success`, `message`, `error`.
+    """
+    client = get_client_from_context()
+    result = client.consume_product_purchase(package_name, product_id, token)
+    return result.model_dump()
+
+
+@mcp.tool()
+def refund_order(
+    package_name: str,
+    order_id: str,
+    revoke: bool = False,
+) -> dict[str, Any]:
+    """Refund (and optionally revoke) a Google Play order.
+
+    Defaults to refund-without-revoke. Pass `revoke=True` only when you also
+    want to strip the user's entitlement (e.g. policy violation). For most
+    "issue a refund on user request" flows you want the default.
+
+    Args:
+        package_name: App package name.
+        order_id: Order ID, typically `GPA.XXXX-XXXX-XXXX-XXXXX`.
+        revoke: If True, also revoke entitlement. Default False.
+
+    Returns:
+        Dict with `success`, `revoked`, `message`, `error`.
+    """
+    if err := _validate_order_id_value(order_id):
+        return {"success": False, "error": err}
+
+    client = get_client_from_context()
+    result = client.refund_order(package_name, order_id, revoke)
+    return result.model_dump()
+
+
+# =============================================================================
 # HTTP Endpoints for Streamable Transport
 # =============================================================================
 
