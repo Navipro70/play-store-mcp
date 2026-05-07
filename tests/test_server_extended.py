@@ -1712,3 +1712,336 @@ class TestOfferTools:
             offer_id="trial",
         )
         assert result["success"] is True
+
+
+# =========================================================================
+# H1 follow-up — server-level validation tests for moved-from-client checks
+# =========================================================================
+
+
+from play_store_mcp.server import (  # noqa: E402
+    _validate_base_plan_id_value,
+    _validate_deobfuscation_file_type_value,
+    _validate_offer_id_value,
+    _validate_product_id_value,
+    _validate_purchase_option_id_value,
+)
+
+
+class TestServerValidationHelpers:
+    @pytest.mark.parametrize("v", ["premium", "premium_yearly", "p1.m"])
+    def test_product_id_accepts_valid(self, v: str) -> None:
+        assert _validate_product_id_value(v) is None
+
+    @pytest.mark.parametrize("v", ["", "Has-Upper", "x" * 41, "x-1"])
+    def test_product_id_rejects_invalid(self, v: str) -> None:
+        assert _validate_product_id_value(v) is not None
+
+    @pytest.mark.parametrize("v", ["monthly", "p1", "abc-123"])
+    def test_base_plan_id_accepts_valid(self, v: str) -> None:
+        assert _validate_base_plan_id_value(v) is None
+
+    @pytest.mark.parametrize("v", ["", "BAD", "with_underscore", "x" * 64])
+    def test_base_plan_id_rejects_invalid(self, v: str) -> None:
+        assert _validate_base_plan_id_value(v) is not None
+
+    @pytest.mark.parametrize("v", ["trial", "intro-50", "x"])
+    def test_offer_id_accepts_valid(self, v: str) -> None:
+        assert _validate_offer_id_value(v) is None
+
+    @pytest.mark.parametrize("v", ["", "BAD", "with_underscore", "-leading"])
+    def test_offer_id_rejects_invalid(self, v: str) -> None:
+        assert _validate_offer_id_value(v) is not None
+
+    @pytest.mark.parametrize("v", ["default", "buy", "premium-once"])
+    def test_purchase_option_id_accepts_valid(self, v: str) -> None:
+        assert _validate_purchase_option_id_value(v) is None
+
+    @pytest.mark.parametrize("v", ["", "UPPER", "with_underscore"])
+    def test_purchase_option_id_rejects_invalid(self, v: str) -> None:
+        assert _validate_purchase_option_id_value(v) is not None
+
+    @pytest.mark.parametrize("v", ["proguard", "nativeCode"])
+    def test_deobfuscation_file_type_accepts_valid(self, v: str) -> None:
+        assert _validate_deobfuscation_file_type_value(v) is None
+
+    @pytest.mark.parametrize("v", ["", "PROGUARD", "native", "txt"])
+    def test_deobfuscation_file_type_rejects_invalid(self, v: str) -> None:
+        assert _validate_deobfuscation_file_type_value(v) is not None
+
+
+class TestUploadDeobfuscationServerValidation:
+    def test_invalid_file_type_rejected(self, mock_client: MagicMock, tmp_path: Any) -> None:
+        f = tmp_path / "mapping.txt"
+        f.write_text("x")
+        result = upload_deobfuscation_file(
+            package_name="com.example.app",
+            version_code=100,
+            file_path=str(f),
+            file_type="invalid",
+        )
+        assert result["success"] is False
+        assert "proguard" in result["error"]
+        mock_client.upload_deobfuscation_file.assert_not_called()
+
+
+class TestCreateUpdateOnetimeProductValidation:
+    def test_create_invalid_product_id(self, mock_client: MagicMock) -> None:
+        result = create_onetime_product(
+            package_name="com.example.app",
+            product_id="Has-Upper",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+            price_micros=9_990_000,
+        )
+        assert result["success"] is False
+        mock_client.upsert_onetime_product.assert_not_called()
+
+    def test_create_zero_price(self, mock_client: MagicMock) -> None:
+        result = create_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+            price_micros=0,
+        )
+        assert result["success"] is False
+        assert "price_micros" in result["error"]
+        mock_client.upsert_onetime_product.assert_not_called()
+
+    def test_create_bad_purchase_option_id(self, mock_client: MagicMock) -> None:
+        result = create_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+            price_micros=9_990_000,
+            purchase_option_id="UPPER",
+        )
+        assert result["success"] is False
+        mock_client.upsert_onetime_product.assert_not_called()
+
+    def test_update_invalid_product_id(self, mock_client: MagicMock) -> None:
+        result = update_onetime_product(
+            package_name="com.example.app",
+            product_id="Has-Upper",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+            price_micros=9_990_000,
+        )
+        assert result["success"] is False
+        mock_client.upsert_onetime_product.assert_not_called()
+
+
+class TestActivateDeactivateOnetimeProductValidation:
+    def test_activate_bad_purchase_option_id(self, mock_client: MagicMock) -> None:
+        result = activate_onetime_product(
+            package_name="com.example.app",
+            product_id="premium",
+            purchase_option_id="UPPER",
+        )
+        assert result["success"] is False
+        mock_client.activate_onetime_product.assert_not_called()
+
+
+class TestCreateSubscriptionProductValidation:
+    def test_invalid_product_id(self, mock_client: MagicMock) -> None:
+        result = create_subscription_product(
+            package_name="com.example.app",
+            product_id="Has-Upper",
+            listings=[{"language_code": "en-US", "title": "T", "description": "D"}],
+        )
+        assert result["success"] is False
+        mock_client.create_subscription_product.assert_not_called()
+
+
+class TestAddBasePlanValidation:
+    def test_invalid_base_plan_id(self, mock_client: MagicMock) -> None:
+        result = add_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="BAD-ID",
+            billing_period_duration="P1M",
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is False
+        mock_client.add_base_plan.assert_not_called()
+
+
+class TestActivateDeactivateBasePlanValidation:
+    def test_activate_invalid_id(self, mock_client: MagicMock) -> None:
+        result = activate_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="BAD-ID",
+        )
+        assert result["success"] is False
+        mock_client.activate_base_plan.assert_not_called()
+
+    def test_deactivate_invalid_id(self, mock_client: MagicMock) -> None:
+        result = deactivate_base_plan(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="BAD-ID",
+        )
+        assert result["success"] is False
+        mock_client.deactivate_base_plan.assert_not_called()
+
+
+class TestCreateActivateOfferValidation:
+    def test_create_invalid_offer_id(self, mock_client: MagicMock) -> None:
+        result = create_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="BAD",
+            phases=[{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result["success"] is False
+        mock_client.create_subscription_offer.assert_not_called()
+
+    def test_create_empty_regional_configs(self, mock_client: MagicMock) -> None:
+        result = create_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="trial",
+            phases=[{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+            regional_configs=[],
+        )
+        assert result["success"] is False
+        mock_client.create_subscription_offer.assert_not_called()
+
+    def test_activate_invalid_offer_id(self, mock_client: MagicMock) -> None:
+        result = activate_subscription_offer(
+            package_name="com.example.app",
+            product_id="premium",
+            base_plan_id="monthly",
+            offer_id="BAD",
+        )
+        assert result["success"] is False
+        mock_client.activate_subscription_offer.assert_not_called()
+
+
+# =========================================================================
+# M1 — Group #5 failure-path tests at the client layer (HttpError → result.success=False)
+# =========================================================================
+
+
+class TestGroup5HttpErrorPropagation:
+    """Verify Group #5 client methods convert HttpError into success=False results
+    or raise PlayStoreClientError, depending on method type."""
+
+    def test_activate_base_plan_http_error(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        bp = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value
+        resp = MagicMock()
+        resp.status = 409
+        bp.activate.return_value.execute.side_effect = _HttpError(resp=resp, content=b"conflict")
+
+        result = client.activate_base_plan("com.example.app", "premium", "monthly")
+        assert result.success is False
+        assert "activate_base_plan failed" in result.message
+
+    def test_deactivate_base_plan_http_error(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        bp = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value
+        resp = MagicMock()
+        resp.status = 409
+        bp.deactivate.return_value.execute.side_effect = _HttpError(resp=resp, content=b"conflict")
+
+        result = client.deactivate_base_plan("com.example.app", "premium", "monthly")
+        assert result.success is False
+        assert "deactivate_base_plan failed" in result.message
+
+    def test_migrate_base_plan_prices_http_error(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        bp = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value
+        resp = MagicMock()
+        resp.status = 400
+        bp.migratePrices.return_value.execute.side_effect = _HttpError(resp=resp, content=b"bad")
+
+        result = client.migrate_base_plan_prices(
+            "com.example.app",
+            "premium",
+            "monthly",
+            [{"regionCode": "US", "priceIncreaseType": "PRICE_INCREASE_TYPE_NORMAL"}],
+        )
+        assert result.success is False
+        assert "Migration failed" in result.message
+
+    def test_create_subscription_offer_http_error(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        resp = MagicMock()
+        resp.status = 400
+        offers.create.return_value.execute.side_effect = _HttpError(resp=resp, content=b"bad")
+
+        result = client.create_subscription_offer(
+            "com.example.app",
+            "premium",
+            "monthly",
+            "trial",
+            phases=[{"duration": "P7D", "recurrenceCount": 1, "regionalConfigs": []}],
+            regional_configs=[{"regionCode": "US"}],
+        )
+        assert result.success is False
+        assert "Create offer failed" in result.message
+
+    def test_activate_subscription_offer_http_error(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        resp = MagicMock()
+        resp.status = 404
+        offers.activate.return_value.execute.side_effect = _HttpError(
+            resp=resp, content=b"not found"
+        )
+
+        result = client.activate_subscription_offer(
+            "com.example.app", "premium", "monthly", "trial"
+        )
+        assert result.success is False
+        assert "activate_subscription_offer failed" in result.message
+
+    def test_deactivate_subscription_offer_http_error(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        resp = MagicMock()
+        resp.status = 404
+        offers.deactivate.return_value.execute.side_effect = _HttpError(
+            resp=resp, content=b"not found"
+        )
+
+        result = client.deactivate_subscription_offer(
+            "com.example.app", "premium", "monthly", "trial"
+        )
+        assert result.success is False
+        assert "deactivate_subscription_offer failed" in result.message
+
+    def test_list_subscription_offers_http_error_raises(
+        self, client: PlayStoreClient, _mock_service: MagicMock
+    ) -> None:
+        from googleapiclient.errors import HttpError as _HttpError
+
+        offers = _mock_service.monetization.return_value.subscriptions.return_value.basePlans.return_value.offers.return_value
+        resp = MagicMock()
+        resp.status = 403
+        offers.list.return_value.execute.side_effect = _HttpError(resp=resp, content=b"forbidden")
+
+        with pytest.raises(PlayStoreClientError):
+            client.list_subscription_offers("com.example.app", "premium", "monthly")

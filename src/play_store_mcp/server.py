@@ -1294,6 +1294,8 @@ def upload_deobfuscation_file(
     """
     if version_code <= 0:
         return {"success": False, "error": "version_code must be positive"}
+    if err := _validate_deobfuscation_file_type_value(file_type):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.upload_deobfuscation_file(package_name, version_code, file_path, file_type)
@@ -1449,6 +1451,79 @@ def validate_edit(
 
 
 # =============================================================================
+# Group #2 / #5 — shared validation helpers (no API call)
+# =============================================================================
+
+
+_PRODUCT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.]{0,39}$")
+_BASE_PLAN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,62}$")
+_OFFER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,62}$")
+_PURCHASE_OPTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,62}$")
+_DEOBFUSCATION_FILE_TYPES: tuple[str, ...] = ("proguard", "nativeCode")
+
+
+def _validate_product_id_value(product_id: str) -> str | None:
+    if not product_id:
+        return "product_id cannot be empty"
+    if not _PRODUCT_ID_RE.match(product_id):
+        return (
+            f"product_id must be 1-40 chars of [a-z0-9_.] starting with [a-z0-9]; got: {product_id}"
+        )
+    return None
+
+
+def _validate_base_plan_id_value(base_plan_id: str) -> str | None:
+    if not base_plan_id:
+        return "base_plan_id cannot be empty"
+    if not _BASE_PLAN_ID_RE.match(base_plan_id):
+        return (
+            "base_plan_id must start with [a-z0-9], contain only [a-z0-9-], "
+            f"≤63 chars; got: {base_plan_id}"
+        )
+    return None
+
+
+def _validate_offer_id_value(offer_id: str) -> str | None:
+    if not offer_id:
+        return "offer_id cannot be empty"
+    if not _OFFER_ID_RE.match(offer_id):
+        return (
+            f"offer_id must start with [a-z0-9], contain only [a-z0-9-], ≤63 chars; got: {offer_id}"
+        )
+    return None
+
+
+def _validate_purchase_option_id_value(purchase_option_id: str) -> str | None:
+    if not purchase_option_id:
+        return "purchase_option_id cannot be empty"
+    if not _PURCHASE_OPTION_ID_RE.match(purchase_option_id):
+        return (
+            "purchase_option_id must start with [a-z0-9], contain only "
+            f"[a-z0-9-], ≤63 chars; got: {purchase_option_id}"
+        )
+    return None
+
+
+def _validate_deobfuscation_file_type_value(file_type: str) -> str | None:
+    if file_type not in _DEOBFUSCATION_FILE_TYPES:
+        return f"file_type must be one of {_DEOBFUSCATION_FILE_TYPES}; got: {file_type}"
+    return None
+
+
+def _validate_product_listings(listings: Any) -> str | None:
+    """Check that ``listings`` is a list of dicts with the required keys."""
+    if not isinstance(listings, list) or not listings:
+        return "listings must be a non-empty list"
+    for entry in listings:
+        if not isinstance(entry, dict):
+            return "each listing entry must be a dict"
+        for required in ("language_code", "title"):
+            if not entry.get(required):
+                return f"listing entry missing required field: {required}"
+    return None
+
+
+# =============================================================================
 # Group #2: monetization.onetimeproducts (modern IAP API)
 # =============================================================================
 
@@ -1540,10 +1615,14 @@ def create_onetime_product(
     Returns:
         Dict with `success`, `product` (full record), `message`, `error`.
     """
-    if not product_id:
-        return {"success": False, "error": "product_id cannot be empty"}
-    if not isinstance(listings, list) or not listings:
-        return {"success": False, "error": "listings must be a non-empty list"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_product_listings(listings):
+        return {"success": False, "error": err}
+    if price_micros <= 0:
+        return {"success": False, "error": "price_micros must be positive"}
+    if err := _validate_purchase_option_id_value(purchase_option_id):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.upsert_onetime_product(
@@ -1574,10 +1653,14 @@ def update_onetime_product(
 
     Args/Returns: see `create_onetime_product`.
     """
-    if not product_id:
-        return {"success": False, "error": "product_id cannot be empty"}
-    if not isinstance(listings, list) or not listings:
-        return {"success": False, "error": "listings must be a non-empty list"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_product_listings(listings):
+        return {"success": False, "error": err}
+    if price_micros <= 0:
+        return {"success": False, "error": "price_micros must be positive"}
+    if err := _validate_purchase_option_id_value(purchase_option_id):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.upsert_onetime_product(
@@ -1636,8 +1719,10 @@ def activate_onetime_product(
     Returns:
         Dict with `success`, `message`, `error`.
     """
-    if not product_id:
-        return {"success": False, "error": "product_id cannot be empty"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_purchase_option_id_value(purchase_option_id):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.activate_onetime_product(package_name, product_id, purchase_option_id)
@@ -1663,8 +1748,10 @@ def deactivate_onetime_product(
     Returns:
         Dict with `success`, `message`, `error`.
     """
-    if not product_id:
-        return {"success": False, "error": "product_id cannot be empty"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_purchase_option_id_value(purchase_option_id):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.deactivate_onetime_product(package_name, product_id, purchase_option_id)
@@ -1714,7 +1801,7 @@ def batch_create_onetime_products(
 # =============================================================================
 
 
-_ISO8601_PERIOD_RE = re.compile(r"^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?$")
+_ISO8601_PERIOD_RE = re.compile(r"^P(?=\d)(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?$")
 
 
 @mcp.tool()
@@ -1781,8 +1868,10 @@ def create_subscription_product(
     Returns:
         Dict with `success`, `subscription`, `message`, `error`.
     """
-    if not isinstance(listings, list) or not listings:
-        return {"success": False, "error": "listings must be a non-empty list"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_product_listings(listings):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.create_subscription_product(package_name, product_id, listings)
@@ -1808,10 +1897,10 @@ def update_subscription_product(
     Returns:
         Dict with `success`, `subscription`, `message`, `error`.
     """
-    if not product_id:
-        return {"success": False, "error": "product_id cannot be empty"}
-    if not isinstance(listings, list) or not listings:
-        return {"success": False, "error": "listings must be a non-empty list"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_product_listings(listings):
+        return {"success": False, "error": err}
 
     client = get_client_from_context()
     result = client.update_subscription_product(package_name, product_id, listings)
@@ -1828,8 +1917,8 @@ def archive_subscription_product(
     Existing subscribers keep their access; new subscriptions can no longer
     be sold. Archive is reversible.
     """
-    if not product_id:
-        return {"success": False, "error": "product_id cannot be empty"}
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
     client = get_client_from_context()
     result = client.archive_subscription_product(package_name, product_id)
     return result.model_dump()
@@ -1865,6 +1954,10 @@ def add_base_plan(
     Returns:
         Dict with `success`, `subscription`, `message`, `error`.
     """
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
     if not _ISO8601_PERIOD_RE.match(billing_period_duration):
         return {
             "success": False,
@@ -1895,6 +1988,10 @@ def activate_base_plan(
     base_plan_id: str,
 ) -> dict[str, Any]:
     """Activate a base plan (`subscriptions.basePlans.activate`)."""
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
     client = get_client_from_context()
     result = client.activate_base_plan(package_name, product_id, base_plan_id)
     return result.model_dump()
@@ -1907,6 +2004,10 @@ def deactivate_base_plan(
     base_plan_id: str,
 ) -> dict[str, Any]:
     """Deactivate a base plan (`subscriptions.basePlans.deactivate`)."""
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
     client = get_client_from_context()
     result = client.deactivate_base_plan(package_name, product_id, base_plan_id)
     return result.model_dump()
@@ -1926,6 +2027,10 @@ def migrate_base_plan_prices(
     typically include `regionCode`, `oldestAllowedPriceVersionTime`, and
     `priceIncreaseType`.
     """
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
     if not isinstance(regional_price_migrations, list) or not regional_price_migrations:
         return {
             "success": False,
@@ -1945,6 +2050,10 @@ def list_subscription_offers(
     base_plan_id: str,
 ) -> dict[str, Any]:
     """List subscription offers under a base plan."""
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
     client = get_client_from_context()
     try:
         offers = client.list_subscription_offers(package_name, product_id, base_plan_id)
@@ -1970,25 +2079,65 @@ def create_subscription_offer(
 ) -> dict[str, Any]:
     """Create a subscription offer (intro / trial / discount).
 
+    **Two regionalConfigs lists, do not confuse them:**
+
+    - The top-level `regional_configs` argument (this tool's parameter) is a
+      list of `RegionalSubscriptionOfferConfig` items. It controls **offer
+      eligibility** per region — fields like `regionCode` and
+      `newSubscriberAvailability`. **No price information goes here.**
+    - Each entry inside `phases[i]` has its own nested `regionalConfigs` field
+      (`RegionalSubscriptionOfferPhaseConfig`) that carries **the actual
+      price** for that phase in each region: `regionCode`, `price.units`,
+      `price.nanos`, `price.currencyCode`, optional `absoluteDiscount`,
+      `relativeDiscount`, or `free=True` for trials. That list must include
+      the same regions as the offer-level `regional_configs`.
+
+    Free trial example (single phase, free in US/GB):
+
+    ```python
+    phases = [
+        {
+            "duration": "P7D",
+            "recurrenceCount": 1,
+            "regionalConfigs": [
+                {"regionCode": "US", "free": True},
+                {"regionCode": "GB", "free": True},
+            ],
+        }
+    ]
+    regional_configs = [
+        {"regionCode": "US", "newSubscriberAvailability": True},
+        {"regionCode": "GB", "newSubscriberAvailability": True},
+    ]
+    ```
+
     Args:
         package_name: App package name.
         product_id: Subscription product ID.
         base_plan_id: Parent base plan ID.
         offer_id: New offer ID. Pattern: `[a-z0-9-]`, ≤63 chars.
         phases: 1-2 phases. Each phase is a dict with `duration` (ISO 8601),
-            `recurrenceCount`, and `regionalConfigs`. The first phase is the
-            promotional one (e.g. free trial); the second can be a
-            full-price recurrence.
-        regional_configs: Per-region availability for the offer (list of
-            {regionCode, newSubscriberAvailability}).
+            `recurrenceCount`, and **per-phase** `regionalConfigs` (with
+            pricing). The first phase is the promotional one (e.g. free
+            trial); the second can be a full-price recurrence.
+        regional_configs: **Offer-level eligibility**, NOT pricing. List of
+            {regionCode, newSubscriberAvailability}.
 
     Returns:
         Dict with `success`, `offer`, `message`, `error`.
     """
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
+    if err := _validate_offer_id_value(offer_id):
+        return {"success": False, "error": err}
     if not isinstance(phases, list) or not phases:
         return {"success": False, "error": "phases must be 1-2 non-empty list"}
     if len(phases) > 2:
         return {"success": False, "error": "phases must contain at most 2 entries"}
+    if not isinstance(regional_configs, list) or not regional_configs:
+        return {"success": False, "error": "regional_configs must be non-empty list"}
 
     client = get_client_from_context()
     result = client.create_subscription_offer(
@@ -2005,6 +2154,12 @@ def activate_subscription_offer(
     offer_id: str,
 ) -> dict[str, Any]:
     """Activate a subscription offer (`offers.activate`)."""
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
+    if err := _validate_offer_id_value(offer_id):
+        return {"success": False, "error": err}
     client = get_client_from_context()
     result = client.activate_subscription_offer(package_name, product_id, base_plan_id, offer_id)
     return result.model_dump()
@@ -2018,6 +2173,12 @@ def deactivate_subscription_offer(
     offer_id: str,
 ) -> dict[str, Any]:
     """Deactivate a subscription offer (`offers.deactivate`)."""
+    if err := _validate_product_id_value(product_id):
+        return {"success": False, "error": err}
+    if err := _validate_base_plan_id_value(base_plan_id):
+        return {"success": False, "error": err}
+    if err := _validate_offer_id_value(offer_id):
+        return {"success": False, "error": err}
     client = get_client_from_context()
     result = client.deactivate_subscription_offer(package_name, product_id, base_plan_id, offer_id)
     return result.model_dump()

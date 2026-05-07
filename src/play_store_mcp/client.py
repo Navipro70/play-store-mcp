@@ -2467,19 +2467,10 @@ class PlayStoreClient:
     ) -> DeobfuscationResult:
         """Upload a mapping.txt or native debug symbols for an APK/AAB version.
 
-        Mirrors `edits.deobfuscationfiles.upload`. ``file_type`` must be
-        ``"proguard"`` or ``"nativeCode"``. The upload runs in its own edit
-        session and is committed on success.
+        Mirrors `edits.deobfuscationfiles.upload`. The upload runs in its own
+        edit session and is committed on success. Server callers must validate
+        ``file_type`` (proguard | nativeCode) before invoking this method.
         """
-        if file_type not in {"proguard", "nativeCode"}:
-            return DeobfuscationResult(
-                success=False,
-                package_name=package_name,
-                version_code=version_code,
-                file_type=file_type,
-                message=f"file_type must be 'proguard' or 'nativeCode', got: {file_type}",
-                error="ValueError",
-            )
         try:
             resolved = self._validate_mapping_file(file_path)
         except ValueError as e:
@@ -2862,49 +2853,11 @@ class PlayStoreClient:
 
         Builds regional prices from a single USD price by calling
         ``convertRegionPrices`` and bundles everything into one PATCH call.
-        """
-        # Validation
-        if not listings:
-            return OnetimeProductMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation=operation_label,
-                message="listings cannot be empty",
-                error="ValueError",
-            )
-        for entry in listings:
-            for required in ("language_code", "title", "description"):
-                if not entry.get(required):
-                    return OnetimeProductMutationResult(
-                        success=False,
-                        package_name=package_name,
-                        product_id=product_id,
-                        operation=operation_label,
-                        message=f"listing entry missing required field: {required}",
-                        error="ValueError",
-                    )
-        if price_micros <= 0:
-            return OnetimeProductMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation=operation_label,
-                message="price_micros must be a positive integer",
-                error="ValueError",
-            )
-        try:
-            self._validate_purchase_option_id(purchase_option_id)
-        except ValueError as e:
-            return OnetimeProductMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation=operation_label,
-                message=str(e),
-                error="ValueError",
-            )
 
+        Caller (server tool) is responsible for validating ``listings`` non-empty
+        with required keys, ``price_micros > 0``, and ``purchase_option_id``
+        format.
+        """
         self._logger.info(
             "Upserting one-time product",
             package_name=package_name,
@@ -3049,22 +3002,12 @@ class PlayStoreClient:
         activate: bool,
     ) -> OnetimeProductMutationResult:
         op = "activate" if activate else "deactivate"
-        try:
-            self._validate_purchase_option_id(purchase_option_id)
-        except ValueError as e:
-            return OnetimeProductMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation=op,
-                message=str(e),
-                error="ValueError",
-            )
         self._logger.info(
-            f"{op}d-purchase-option",
+            "Toggling purchase option state",
             package_name=package_name,
             product_id=product_id,
             purchase_option_id=purchase_option_id,
+            activate=activate,
         )
         sub_request = {
             "packageName": package_name,
@@ -3327,28 +3270,9 @@ class PlayStoreClient:
         """Create a new subscription product (no base plans yet).
 
         Base plans and offers are added separately via ``add_base_plan`` and
-        ``create_subscription_offer``.
+        ``create_subscription_offer``. Server callers must validate
+        ``product_id`` format and that ``listings`` is non-empty.
         """
-        try:
-            self._validate_product_id(product_id)
-        except ValueError as e:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation="create",
-                message=str(e),
-                error="ValueError",
-            )
-        if not listings:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation="create",
-                message="listings cannot be empty",
-                error="ValueError",
-            )
         body = {
             "productId": product_id,
             "packageName": package_name,
@@ -3402,18 +3326,12 @@ class PlayStoreClient:
         self,
         package_name: str,
         product_id: str,
-        listings: list[dict[str, str]] | None = None,
+        listings: list[dict[str, str]],
     ) -> SubscriptionMutationResult:
-        """Update listings of an existing subscription via PATCH."""
-        if not listings:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                operation="update",
-                message="listings cannot be empty",
-                error="ValueError",
-            )
+        """Update listings of an existing subscription via PATCH.
+
+        Server callers must validate that ``listings`` is non-empty.
+        """
         body = {
             "productId": product_id,
             "packageName": package_name,
@@ -3521,31 +3439,10 @@ class PlayStoreClient:
         """Add a base plan to an existing subscription via PATCH.
 
         Reads the current subscription, appends the new BasePlan, and PATCHes
-        with ``updateMask=basePlans``.
+        with ``updateMask=basePlans``. Server callers must validate
+        ``base_plan_id`` format, ``billing_period_duration`` (ISO 8601), and
+        that ``regional_configs`` is non-empty.
         """
-        try:
-            self._validate_base_plan_id(base_plan_id)
-            self._validate_iso8601_period(billing_period_duration)
-        except ValueError as e:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                operation="add_base_plan",
-                message=str(e),
-                error="ValueError",
-            )
-        if not regional_configs:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                operation="add_base_plan",
-                message="regional_configs cannot be empty",
-                error="ValueError",
-            )
         self._logger.info(
             "Adding base plan",
             package_name=package_name,
@@ -3624,23 +3521,12 @@ class PlayStoreClient:
         activate: bool,
     ) -> SubscriptionMutationResult:
         op = "activate_base_plan" if activate else "deactivate_base_plan"
-        try:
-            self._validate_base_plan_id(base_plan_id)
-        except ValueError as e:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                operation=op,
-                message=str(e),
-                error="ValueError",
-            )
         self._logger.info(
-            op,
+            "Toggling base plan state",
             package_name=package_name,
             product_id=product_id,
             base_plan_id=base_plan_id,
+            activate=activate,
         )
         service = self._get_service()
         method = service.monetization().subscriptions().basePlans()
@@ -3700,17 +3586,11 @@ class PlayStoreClient:
         base_plan_id: str,
         regional_price_migrations: list[dict[str, Any]],
     ) -> SubscriptionMutationResult:
-        """Migrate existing subscribers to new regional prices."""
-        if not regional_price_migrations:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                operation="migrate_base_plan_prices",
-                message="regional_price_migrations cannot be empty",
-                error="ValueError",
-            )
+        """Migrate existing subscribers to new regional prices.
+
+        Server callers must validate that ``regional_price_migrations`` is
+        non-empty.
+        """
         self._logger.info(
             "Migrating base plan prices",
             package_name=package_name,
@@ -3804,42 +3684,11 @@ class PlayStoreClient:
         phases: list[dict[str, Any]],
         regional_configs: list[dict[str, Any]],
     ) -> SubscriptionMutationResult:
-        """Create a subscription offer under a base plan."""
-        try:
-            self._validate_offer_id(offer_id)
-        except ValueError as e:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                offer_id=offer_id,
-                operation="create_subscription_offer",
-                message=str(e),
-                error="ValueError",
-            )
-        if not phases:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                offer_id=offer_id,
-                operation="create_subscription_offer",
-                message="phases cannot be empty (1-2 entries required)",
-                error="ValueError",
-            )
-        if not regional_configs:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                offer_id=offer_id,
-                operation="create_subscription_offer",
-                message="regional_configs cannot be empty",
-                error="ValueError",
-            )
+        """Create a subscription offer under a base plan.
+
+        Server callers must validate ``offer_id`` format and that ``phases``
+        and ``regional_configs`` are both non-empty.
+        """
         self._logger.info(
             "Creating subscription offer",
             package_name=package_name,
@@ -3904,25 +3753,13 @@ class PlayStoreClient:
         activate: bool,
     ) -> SubscriptionMutationResult:
         op = "activate_subscription_offer" if activate else "deactivate_subscription_offer"
-        try:
-            self._validate_offer_id(offer_id)
-        except ValueError as e:
-            return SubscriptionMutationResult(
-                success=False,
-                package_name=package_name,
-                product_id=product_id,
-                base_plan_id=base_plan_id,
-                offer_id=offer_id,
-                operation=op,
-                message=str(e),
-                error="ValueError",
-            )
         self._logger.info(
-            op,
+            "Toggling subscription offer state",
             package_name=package_name,
             product_id=product_id,
             base_plan_id=base_plan_id,
             offer_id=offer_id,
+            activate=activate,
         )
         service = self._get_service()
         offers = service.monetization().subscriptions().basePlans().offers()
